@@ -1,0 +1,22 @@
+# Core GUI & Multimedia
+PyQt6
+
+# Audio Capture & Signal Processing
+numpy
+soundcard
+soundfile
+
+# Music Recognition
+shazamio
+
+# Local AI Voice/SFX Separation (NVIDIA GPU)
+# For CPU-only machines, replace the two lines below with: audio-separator[cpu]
+audio-separator[gpu]
+onnxruntime-gpu[cuda,cudnn]
+
+# Windows Global Hotkeys & Notifications
+keyboard
+winotify
+
+# Packaging (only needed when running build_release.bat)
+pyinstaller
