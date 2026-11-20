@@ -1,0 +1,868 @@
+import os
+import struct
+
+from PyQt6.QtCore import QBuffer, QByteArray, QIODevice, QPointF, QRectF, Qt
+from PyQt6.QtGui import (
+    QBrush,
+    QColor,
+    QIcon,
+    QLinearGradient,
+    QPainter,
+    QPainterPath,
+    QPalette,
+    QPen,
+    QPixmap,
+    QPolygonF,
+)
+
+from .config import ICONS_DIR, resolve_cover_path
+
+
+def create_app_pixmap(size=64):
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    pad = max(1, size // 28)
+    grad = QLinearGradient(0, 0, size, size)
+    grad.setColorAt(0.0, QColor("#3B82F6"))
+    grad.setColorAt(1.0, QColor("#8B5CF6"))
+    painter.setBrush(QBrush(grad))
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.drawEllipse(pad, pad, size - pad * 2, size - pad * 2)
+
+    pen_w = max(2, int(size * 0.085))
+    painter.setPen(
+        QPen(
+            QColor("#FFFFFF"),
+            pen_w,
+            Qt.PenStyle.SolidLine,
+            Qt.PenCapStyle.RoundCap,
+        )
+    )
+    cx = size / 2.0
+    cy = size / 2.0
+    bars = [(-0.27, 0.16), (-0.135, 0.30), (0.0, 0.42), (0.135, 0.26), (0.27, 0.16)]
+    for dx, h in bars:
+        x = int(round(cx + dx * size))
+        half_h = int(round((h * size) / 2.0))
+        painter.drawLine(x, int(round(cy - half_h)), x, int(round(cy + half_h)))
+
+    painter.end()
+    return pixmap
+
+
+def create_app_icon():
+    icon = QIcon()
+    for sz in (16, 24, 32, 48, 64, 128, 256):
+        icon.addPixmap(create_app_pixmap(sz))
+    return icon
+
+
+def export_multi_res_ico(out_path):
+    sizes = [16, 24, 32, 48, 64, 128, 256]
+    frames = []
+    for sz in sizes:
+        pix = create_app_pixmap(sz)
+        ba = QByteArray()
+        buf = QBuffer(ba)
+        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        pix.save(buf, "PNG")
+        frames.append((sz, bytes(ba)))
+
+    header = struct.pack("<HHH", 0, 1, len(frames))
+    offset = 6 + 16 * len(frames)
+    entries = []
+    blobs = []
+    for sz, data in frames:
+        dim = 0 if sz == 256 else sz
+        entries.append(struct.pack("<BBBBHHII", dim, dim, 0, 0, 1, 32, len(data), offset))
+        blobs.append(data)
+        offset += len(data)
+
+    with open(out_path, "wb") as f:
+        f.write(header)
+        for e in entries:
+            f.write(e)
+        for b in blobs:
+            f.write(b)
+
+
+def ensure_chevron_icons():
+    specs = [
+        ("down_dark.png", "down", "#A1A1AA"),
+        ("up_dark.png", "up", "#A1A1AA"),
+        ("down_light.png", "down", "#475569"),
+        ("up_light.png", "up", "#475569"),
+    ]
+    paths = {}
+    for fname, direction, color in specs:
+        fpath = os.path.join(ICONS_DIR, fname)
+        pix = QPixmap(12, 12)
+        pix.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(
+            QColor(color),
+            1.6,
+            Qt.PenStyle.SolidLine,
+            Qt.PenCapStyle.RoundCap,
+            Qt.PenJoinStyle.RoundJoin,
+        )
+        p.setPen(pen)
+        if direction == "down":
+            p.drawPolyline(QPolygonF([QPointF(3.0, 4.5), QPointF(6.0, 7.5), QPointF(9.0, 4.5)]))
+        else:
+            p.drawPolyline(QPolygonF([QPointF(3.0, 7.5), QPointF(6.0, 4.5), QPointF(9.0, 7.5)]))
+        p.end()
+        pix.save(fpath, "PNG")
+        paths[fname] = fpath.replace("\\", "/")
+    return paths
+
+
+def create_ui_icon(kind: str, color_hex="#E4E4E7", size=16):
+    pix = QPixmap(size, size)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(
+        QColor(color_hex),
+        1.6,
+        Qt.PenStyle.SolidLine,
+        Qt.PenCapStyle.RoundCap,
+        Qt.PenJoinStyle.RoundJoin,
+    )
+    p.setPen(pen)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+
+    s = float(size)
+    if kind == "identify":
+        for x, h in [(0.16, 0.28), (0.33, 0.56), (0.50, 0.78), (0.67, 0.50), (0.84, 0.28)]:
+            p.drawLine(QPointF(s * x, s * (0.5 - h / 2)), QPointF(s * x, s * (0.5 + h / 2)))
+    elif kind == "library":
+        p.drawLine(QPointF(s * 0.20, s * 0.25), QPointF(s * 0.55, s * 0.25))
+        p.drawLine(QPointF(s * 0.20, s * 0.50), QPointF(s * 0.48, s * 0.50))
+        p.drawLine(QPointF(s * 0.20, s * 0.75), QPointF(s * 0.45, s * 0.75))
+        p.drawLine(QPointF(s * 0.72, s * 0.72), QPointF(s * 0.72, s * 0.24))
+        p.drawLine(QPointF(s * 0.72, s * 0.24), QPointF(s * 0.88, s * 0.30))
+        p.setBrush(QBrush(QColor(color_hex)))
+        p.drawEllipse(QPointF(s * 0.64, s * 0.74), s * 0.11, s * 0.09)
+    elif kind == "settings":
+        p.drawLine(QPointF(s * 0.16, s * 0.28), QPointF(s * 0.84, s * 0.28))
+        p.drawLine(QPointF(s * 0.16, s * 0.52), QPointF(s * 0.84, s * 0.52))
+        p.drawLine(QPointF(s * 0.16, s * 0.76), QPointF(s * 0.84, s * 0.76))
+        p.setBrush(QBrush(QColor(color_hex)))
+        p.drawEllipse(QPointF(s * 0.35, s * 0.28), s * 0.10, s * 0.10)
+        p.drawEllipse(QPointF(s * 0.68, s * 0.52), s * 0.10, s * 0.10)
+        p.drawEllipse(QPointF(s * 0.42, s * 0.76), s * 0.10, s * 0.10)
+    elif kind == "sidebar":
+        # Rounded rectangle with left sidebar panel divider (Gemini-style)
+        p.drawRoundedRect(QRectF(s * 0.12, s * 0.16, s * 0.76, s * 0.68), s * 0.16, s * 0.16)
+        p.drawLine(QPointF(s * 0.38, s * 0.18), QPointF(s * 0.38, s * 0.82))
+    elif kind == "pin":
+        p.drawLine(QPointF(s * 0.32, s * 0.20), QPointF(s * 0.68, s * 0.20))
+        p.drawLine(QPointF(s * 0.38, s * 0.20), QPointF(s * 0.34, s * 0.52))
+        p.drawLine(QPointF(s * 0.62, s * 0.20), QPointF(s * 0.66, s * 0.52))
+        p.drawLine(QPointF(s * 0.24, s * 0.54), QPointF(s * 0.76, s * 0.54))
+        p.drawLine(QPointF(s * 0.50, s * 0.54), QPointF(s * 0.50, s * 0.88))
+    elif kind == "details":
+        p.drawEllipse(QRectF(s * 0.14, s * 0.14, s * 0.72, s * 0.72))
+        p.drawLine(QPointF(s * 0.50, s * 0.46), QPointF(s * 0.50, s * 0.68))
+        p.setBrush(QBrush(QColor(color_hex)))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawEllipse(QPointF(s * 0.50, s * 0.32), s * 0.06, s * 0.06)
+
+    p.end()
+    return QIcon(pix)
+
+
+def create_platform_icon(kind: str, size=14):
+    pix = QPixmap(size, size)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    colors = {
+        "shazam": "#0088FF",
+        "youtube": "#FF0000",
+        "yt_music": "#FF0033",
+        "spotify": "#1DB954",
+        "apple": "#FA243C",
+        "soundcloud": "#FF5500",
+        "deezer": "#A238FF",
+        "amazon": "#00A8E1",
+        "tidal": "#18181B",
+        "web": "#3B82F6",
+        "copy": "#64748B",
+    }
+    bg = QColor(colors.get(kind, "#3B82F6"))
+    p.setBrush(QBrush(bg))
+    p.setPen(Qt.PenStyle.NoPen)
+
+    if kind == "youtube":
+        p.drawRoundedRect(QRectF(0, 2, size, size - 4), 3, 3)
+        p.setBrush(QBrush(QColor("#FFFFFF")))
+        tri = QPolygonF(
+            [
+                QPointF(size * 0.40, size * 0.30),
+                QPointF(size * 0.72, size * 0.50),
+                QPointF(size * 0.40, size * 0.70),
+            ]
+        )
+        p.drawPolygon(tri)
+    elif kind == "yt_music":
+        p.drawEllipse(QRectF(0, 0, size, size))
+        p.setPen(QPen(QColor("#FFFFFF"), 1.2))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawEllipse(QRectF(2, 2, size - 4, size - 4))
+        p.setBrush(QBrush(QColor("#FFFFFF")))
+        p.setPen(Qt.PenStyle.NoPen)
+        tri = QPolygonF(
+            [
+                QPointF(size * 0.42, size * 0.32),
+                QPointF(size * 0.70, size * 0.50),
+                QPointF(size * 0.42, size * 0.68),
+            ]
+        )
+        p.drawPolygon(tri)
+    elif kind == "spotify":
+        p.drawEllipse(QRectF(0, 0, size, size))
+        p.setPen(QPen(QColor("#FFFFFF"), 1.3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawArc(3, 4, size - 6, 4, 30 * 16, 120 * 16)
+        p.drawArc(4, 7, size - 8, 4, 30 * 16, 120 * 16)
+        p.drawArc(5, 10, size - 10, 3, 30 * 16, 120 * 16)
+    elif kind == "shazam":
+        p.drawEllipse(QRectF(0, 0, size, size))
+        p.setPen(QPen(QColor("#FFFFFF"), 1.7, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawArc(3, 3, 6, 6, 40 * 16, 190 * 16)
+        p.drawArc(size - 9, size - 9, 6, 6, 220 * 16, 190 * 16)
+    elif kind == "apple":
+        p.drawRoundedRect(QRectF(0, 0, size, size), 3, 3)
+        p.setPen(QPen(QColor("#FFFFFF"), 1.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawLine(QPointF(5, 9), QPointF(5, 4))
+        p.drawLine(QPointF(10, 8), QPointF(10, 3))
+        p.drawLine(QPointF(5, 4), QPointF(10, 3))
+        p.setBrush(QBrush(QColor("#FFFFFF")))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawEllipse(QRectF(3, 8, 3, 3))
+        p.drawEllipse(QRectF(8, 7, 3, 3))
+    elif kind == "soundcloud":
+        p.drawRoundedRect(QRectF(0, 1, size, size - 2), 4, 4)
+        p.setPen(QPen(QColor("#FFFFFF"), 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        for x, y1, y2 in [(3.5, 9, 6), (6.0, 9, 4.5), (8.5, 9, 5), (11.0, 9, 6.5)]:
+            p.drawLine(QPointF(x, y1), QPointF(x, y2))
+    elif kind == "deezer":
+        p.drawRoundedRect(QRectF(0, 0, size, size), 3, 3)
+        p.setPen(QPen(QColor("#FFFFFF"), 1.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        for x, y1, y2 in [(3.5, 10, 7.5), (6.5, 10, 4.5), (9.5, 10, 6), (11.5, 10, 8)]:
+            p.drawLine(QPointF(x, y1), QPointF(x, y2))
+    elif kind == "amazon":
+        p.drawRoundedRect(QRectF(0, 0, size, size), 3, 3)
+        p.setPen(QPen(QColor("#FFFFFF"), 1.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawArc(3, 6, size - 6, 5, 200 * 16, 140 * 16)
+        p.drawLine(QPointF(5, 4.5), QPointF(9, 4.5))
+    elif kind == "tidal":
+        p.setPen(QPen(QColor("#52525B"), 1.0))
+        p.drawRoundedRect(QRectF(0.5, 0.5, size - 1, size - 1), 3, 3)
+        p.setBrush(QBrush(QColor("#FFFFFF")))
+        p.setPen(Qt.PenStyle.NoPen)
+        for cx, cy in [(4.2, 5.5), (7.0, 5.5), (9.8, 5.5), (7.0, 8.5)]:
+            d = 1.4
+            diamond = QPolygonF(
+                [
+                    QPointF(cx, cy - d),
+                    QPointF(cx + d, cy),
+                    QPointF(cx, cy + d),
+                    QPointF(cx - d, cy),
+                ]
+            )
+            p.drawPolygon(diamond)
+    elif kind == "copy":
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(QColor("#94A3B8"), 1.4))
+        p.drawRoundedRect(QRectF(4, 4, 8, 8), 1.5, 1.5)
+        p.drawRoundedRect(QRectF(2, 2, 7, 7), 1.5, 1.5)
+    else:
+        p.drawEllipse(QRectF(0, 0, size, size))
+        p.setPen(QPen(QColor("#FFFFFF"), 1.2))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawEllipse(QRectF(3.5, 2, size - 7, size - 4))
+        p.drawLine(QPointF(2, size / 2), QPointF(size - 2, size / 2))
+
+    p.end()
+    return QIcon(pix)
+
+
+def rounded_pixmap(path, size, radius=12):
+    resolved = resolve_cover_path(path)
+    pix = QPixmap(resolved) if resolved else QPixmap()
+    if pix.isNull():
+        pix = QPixmap(size, size)
+        pix.fill(QColor("#27272A"))
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(QColor("#71717A"))
+        font = p.font()
+        font.setPointSize(max(12, size // 4))
+        p.setFont(font)
+        p.drawText(pix.rect(), Qt.AlignmentFlag.AlignCenter, "♪")
+        p.end()
+
+    scaled = pix.scaled(
+        size,
+        size,
+        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+    x_off = (scaled.width() - size) // 2
+    y_off = (scaled.height() - size) // 2
+    cropped = scaled.copy(x_off, y_off, size, size)
+
+    out = QPixmap(size, size)
+    out.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(out)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    clip = QPainterPath()
+    clip.addRoundedRect(QRectF(0, 0, size, size), radius, radius)
+    painter.setClipPath(clip)
+    painter.drawPixmap(0, 0, cropped)
+    painter.end()
+    return out
+
+
+def _blend_rgb(rgb, base_rgb, weight_base: float):
+    return tuple(
+        int(round(rgb[i] * (1.0 - weight_base) + base_rgb[i] * weight_base))
+        for i in range(3)
+    )
+
+
+def _perceived_luminance(rgb) -> float:
+    return 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
+
+
+def extract_cover_gradient_colors(cover_path: str, dark: bool) -> dict:
+    """Extracts 2 dominant cover colors + accent, contrast-clamped for dark or light mode."""
+    resolved = resolve_cover_path(cover_path)
+    default_c1 = (37, 99, 235)
+    default_c2 = (124, 58, 237)
+    c1, c2, accent = default_c1, default_c2, (59, 130, 246)
+
+    if resolved and os.path.exists(resolved):
+        pix = QPixmap(resolved)
+        if not pix.isNull():
+            img = pix.scaled(
+                24,
+                24,
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            ).toImage()
+
+            top_samples = []
+            bot_samples = []
+            best_sat_score = -1.0
+
+            for y in range(img.height()):
+                for x in range(img.width()):
+                    col = img.pixelColor(x, y)
+                    r, g, b = col.red(), col.green(), col.blue()
+                    sat = col.saturation()
+                    val = col.value()
+                    if y < 12:
+                        top_samples.append((r, g, b))
+                    else:
+                        bot_samples.append((r, g, b))
+
+                    # Prefer saturated, mid-bright color for interactive accent controls
+                    if 45 <= val <= 235 and sat > 40:
+                        score = sat * 1.4 - abs(val - 155) * 0.4
+                        if score > best_sat_score:
+                            best_sat_score = score
+                            accent = (r, g, b)
+
+            def _avg_filtered(samples, fallback):
+                # Ignore extreme near-white/near-black pixels if chromatic pixels exist
+                mid = [
+                    rgb
+                    for rgb in samples
+                    if 28 < _perceived_luminance(rgb) < 230
+                ]
+                use = mid if len(mid) >= 12 else samples
+                if not use:
+                    return fallback
+                n = len(use)
+                return (
+                    sum(p[0] for p in use) // n,
+                    sum(p[1] for p in use) // n,
+                    sum(p[2] for p in use) // n,
+                )
+
+            c1 = _avg_filtered(top_samples, default_c1)
+            c2 = _avg_filtered(bot_samples, default_c2)
+
+    if dark:
+        # Rich dark gradient: strictly capped luminance so white text always pops
+        base = (17, 18, 22)
+        g1 = _blend_rgb(c1, base, 0.56)
+        g2 = _blend_rgb(c2, base, 0.68)
+        if _perceived_luminance(g1) > 88:
+            g1 = _blend_rgb(g1, base, 0.45)
+        if _perceived_luminance(g2) > 74:
+            g2 = _blend_rgb(g2, base, 0.45)
+        # Keep accent bright enough on dark UI
+        if _perceived_luminance(accent) < 85:
+            accent = _blend_rgb(accent, (96, 165, 250), 0.50)
+    else:
+        # Soft pastel wash: strictly floored luminance so dark text always pops
+        base = (238, 242, 248)
+        g1 = _blend_rgb(c1, base, 0.66)
+        g2 = _blend_rgb(c2, base, 0.76)
+        if _perceived_luminance(g1) < 195:
+            g1 = _blend_rgb(g1, (255, 255, 255), 0.42)
+        if _perceived_luminance(g2) < 205:
+            g2 = _blend_rgb(g2, (255, 255, 255), 0.42)
+        if _perceived_luminance(accent) > 175:
+            accent = _blend_rgb(accent, (37, 99, 235), 0.50)
+
+    accent_text = "#111827" if _perceived_luminance(accent) > 160 else "#FFFFFF"
+
+    return {
+        "g1": QColor(*g1),
+        "g2": QColor(*g2),
+        "base": QColor(*base),
+        "accent": f"rgb({accent[0]}, {accent[1]}, {accent[2]})",
+        "accent_text": accent_text,
+    }
+
+
+def build_palette(dark: bool) -> QPalette:
+    """Sets an explicit QPalette so Windows Dark Mode never leaves white labels on Light Mode."""
+    pal = QPalette()
+    if dark:
+        pal.setColor(QPalette.ColorRole.Window, QColor("#111216"))
+        pal.setColor(QPalette.ColorRole.WindowText, QColor("#F4F4F5"))
+        pal.setColor(QPalette.ColorRole.Base, QColor("#1E2028"))
+        pal.setColor(QPalette.ColorRole.AlternateBase, QColor("#1A1B21"))
+        pal.setColor(QPalette.ColorRole.Text, QColor("#F4F4F5"))
+        pal.setColor(QPalette.ColorRole.Button, QColor("#24262F"))
+        pal.setColor(QPalette.ColorRole.ButtonText, QColor("#F4F4F5"))
+        pal.setColor(QPalette.ColorRole.Highlight, QColor("#2563EB"))
+        pal.setColor(QPalette.ColorRole.HighlightedText, QColor("#FFFFFF"))
+    else:
+        pal.setColor(QPalette.ColorRole.Window, QColor("#E9EDF3"))
+        pal.setColor(QPalette.ColorRole.WindowText, QColor("#111827"))
+        pal.setColor(QPalette.ColorRole.Base, QColor("#F5F7FA"))
+        pal.setColor(QPalette.ColorRole.AlternateBase, QColor("#ECEFF4"))
+        pal.setColor(QPalette.ColorRole.Text, QColor("#111827"))
+        pal.setColor(QPalette.ColorRole.Button, QColor("#EDF0F5"))
+        pal.setColor(QPalette.ColorRole.ButtonText, QColor("#111827"))
+        pal.setColor(QPalette.ColorRole.Highlight, QColor("#2563EB"))
+        pal.setColor(QPalette.ColorRole.HighlightedText, QColor("#FFFFFF"))
+    return pal
+
+
+def build_stylesheet(dark: bool, chevrons: dict):
+    dn = chevrons["down_dark.png"] if dark else chevrons["down_light.png"]
+    up = chevrons["up_dark.png"] if dark else chevrons["up_light.png"]
+
+    if dark:
+        c = {
+            "bg": "#111216",
+            "fg": "#F4F4F5",
+            "sidebar": "#17181D",
+            "sidebar_b": "#24262E",
+            "nav_fg": "#A1A1AA",
+            "nav_hover": "#22242C",
+            "card": "#1A1B21",
+            "card_b": "#272932",
+            "muted": "#9CA3AF",
+            "chip_bg": "#24262F",
+            "chip_fg": "#D4D4D8",
+            "inp_bg": "#1E2028",
+            "inp_b": "#2E303C",
+            "btn_bg": "#24262F",
+            "btn_fg": "#E4E4E7",
+            "btn_b": "#323542",
+            "btn_hover": "#323542",
+            "sec_bg": "#1F222C",
+            "sec_b": "#323646",
+            "sec_hover": "#2A2E3C",
+            "id_b": "#2A2D3E",
+            "id_dis_bg": "#272932",
+            "id_dis_fg": "#71717A",
+            "id_dis_b": "#1E2028",
+            "danger_fg": "#F87171",
+            "danger_b": "#451A1A",
+            "danger_hover": "#451A1A",
+            "warn_bg": "rgba(245, 158, 11, 0.13)",
+            "warn_b": "rgba(245, 158, 11, 0.38)",
+            "warn_fg": "#FBBF24",
+            "err_bg": "rgba(239, 68, 68, 0.13)",
+            "err_b": "rgba(239, 68, 68, 0.40)",
+            "err_fg": "#F87171",
+            "help_bg": "#272932",
+            "help_fg": "#A1A1AA",
+            "help_b": "#383B4A",
+            "menu_bg": "#1C1E26",
+            "scroll_h": "#323542",
+            "song_hover_bg": "#202432",
+            "song_hover_b": "#60A5FA",
+        }
+    else:
+        # Layered soft-gray Light Mode with crisp contrast
+        c = {
+            "bg": "#E9EDF3",
+            "fg": "#111827",
+            "sidebar": "#F4F6FA",
+            "sidebar_b": "#D6DCE6",
+            "nav_fg": "#475569",
+            "nav_hover": "#E2E7F0",
+            "card": "#FFFFFF",
+            "card_b": "#D4DBE6",
+            "muted": "#526075",
+            "chip_bg": "#E8EDF5",
+            "chip_fg": "#334155",
+            "inp_bg": "#F5F7FB",
+            "inp_b": "#C8D1DF",
+            "btn_bg": "#EDF1F7",
+            "btn_fg": "#1E293B",
+            "btn_b": "#CBD4E1",
+            "btn_hover": "#DFE6F0",
+            "sec_bg": "#FFFFFF",
+            "sec_b": "#C8D1DF",
+            "sec_hover": "#EDF1F7",
+            "id_b": "#BFDBFE",
+            "id_dis_bg": "#DCE2EC",
+            "id_dis_fg": "#64748B",
+            "id_dis_b": "#E9EDF3",
+            "danger_fg": "#DC2626",
+            "danger_b": "#F5B5B5",
+            "danger_hover": "#FEE2E2",
+            "warn_bg": "#FEF3C7",
+            "warn_b": "#F59E0B",
+            "warn_fg": "#92400E",
+            "err_bg": "#FEE2E2",
+            "err_b": "#EF4444",
+            "err_fg": "#B91C1C",
+            "help_bg": "#DDE3ED",
+            "help_fg": "#334155",
+            "help_b": "#C2CCDC",
+            "menu_bg": "#FFFFFF",
+            "scroll_h": "#BCC6D6",
+            "song_hover_bg": "#F5F9FF",
+            "song_hover_b": "#3B82F6",
+        }
+
+    return f"""
+QMainWindow, QWidget#Root {{
+    background-color: {c['bg']};
+    color: {c['fg']};
+    font-family: "Segoe UI", sans-serif;
+}}
+QWidget {{
+    color: {c['fg']};
+}}
+QLabel {{
+    color: {c['fg']};
+    background-color: transparent;
+}}
+QStackedWidget, QWidget#Page, QWidget#ScrollContent, QScrollArea, QScrollArea > QWidget, QScrollArea > QWidget > QWidget {{
+    background-color: transparent;
+    border: none;
+}}
+QFrame#Sidebar {{
+    background-color: {c['sidebar']};
+    border-right: 1px solid {c['sidebar_b']};
+}}
+QPushButton#NavBtn {{
+    text-align: left;
+    padding: 9px 12px;
+    border-radius: 10px;
+    border: none;
+    color: {c['nav_fg']};
+    font-size: 13px;
+    font-weight: 500;
+    background: transparent;
+}}
+QPushButton#NavBtn:hover {{
+    background-color: {c['nav_hover']};
+    color: {c['fg']};
+}}
+QPushButton#NavBtn[active="true"] {{
+    background-color: #2563EB;
+    color: #FFFFFF;
+    font-weight: 600;
+}}
+QPushButton#NavBtn[collapsed="true"] {{
+    text-align: center;
+    padding: 9px 0px;
+}}
+QPushButton#SidebarIconBtn {{
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    padding: 0px;
+}}
+QPushButton#SidebarIconBtn:hover {{
+    background-color: {c['nav_hover']};
+}}
+QPushButton#SidebarIconBtn[pinned="true"] {{
+    background-color: rgba(37, 99, 235, 0.18);
+    border: 1px solid #3B82F6;
+}}
+QFrame#Card {{
+    background-color: {c['card']};
+    border: 1px solid {c['card_b']};
+    border-radius: 14px;
+}}
+QFrame#SongCard {{
+    background-color: {c['card']};
+    border: 1px solid {c['card_b']};
+    border-radius: 14px;
+}}
+QFrame#SongCard:hover {{
+    background-color: {c['song_hover_bg']};
+    border: 1px solid {c['song_hover_b']};
+}}
+QFrame#WarnBanner {{
+    background-color: {c['warn_bg']};
+    border: 1px solid {c['warn_b']};
+    border-radius: 9px;
+}}
+QLabel#WarnText {{
+    color: {c['warn_fg']};
+    font-size: 11px;
+    font-weight: 500;
+}}
+QFrame#ErrorBanner {{
+    background-color: {c['err_bg']};
+    border: 1px solid {c['err_b']};
+    border-radius: 9px;
+}}
+QLabel#ErrorText {{
+    color: {c['err_fg']};
+    font-size: 11px;
+    font-weight: 600;
+}}
+QLabel#HelpBadge {{
+    background-color: {c['help_bg']};
+    color: {c['help_fg']};
+    border: 1px solid {c['help_b']};
+    border-radius: 8px;
+    font-size: 10px;
+    font-weight: 700;
+}}
+QLabel#HelpBadge:hover {{
+    background-color: #3B82F6;
+    color: #FFFFFF;
+    border-color: #3B82F6;
+}}
+QPushButton#IdentifyBtn {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #3B82F6, stop:1 #7C3AED);
+    color: #FFFFFF;
+    border: 3px solid {c['id_b']};
+    border-radius: 66px;
+    font-size: 15px;
+    font-weight: 700;
+}}
+QPushButton#IdentifyBtn:hover {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #60A5FA, stop:1 #8B5CF6);
+    border: 3px solid #60A5FA;
+}}
+QPushButton#IdentifyBtn:disabled {{
+    background: {c['id_dis_bg']};
+    color: {c['id_dis_fg']};
+    border: 3px solid {c['id_dis_b']};
+}}
+QPushButton#SecondaryActionBtn {{
+    background-color: {c['sec_bg']};
+    color: {c['fg']};
+    border: 1px solid {c['sec_b']};
+    border-radius: 16px;
+    padding: 7px 16px;
+    font-size: 12px;
+    font-weight: 600;
+}}
+QPushButton#SecondaryActionBtn:hover {{
+    background-color: {c['sec_hover']};
+    border-color: #3B82F6;
+}}
+QPushButton#SecondaryActionBtn:disabled {{
+    color: {c['muted']};
+}}
+QPushButton#PrimaryBtn {{
+    background-color: #2563EB;
+    color: #FFFFFF;
+    border: none;
+    border-radius: 8px;
+    padding: 8px 16px;
+    font-size: 12px;
+    font-weight: 600;
+}}
+QPushButton#PrimaryBtn:hover {{
+    background-color: #3B82F6;
+}}
+QPushButton#PlatformBtn {{
+    background-color: {c['btn_bg']};
+    color: {c['btn_fg']};
+    border: 1px solid {c['btn_b']};
+    border-radius: 7px;
+    padding: 4px 9px;
+    font-size: 11px;
+    font-weight: 600;
+}}
+QPushButton#PlatformBtn:hover {{
+    background-color: {c['btn_hover']};
+    border-color: #3B82F6;
+}}
+QPushButton#PlatformBtn::menu-indicator {{
+    image: none;
+    width: 0px;
+}}
+QPushButton#DangerBtn {{
+    background-color: transparent;
+    color: {c['danger_fg']};
+    border: 1px solid {c['danger_b']};
+    border-radius: 8px;
+    padding: 7px 12px;
+    font-size: 12px;
+    font-weight: 600;
+}}
+QPushButton#DangerBtn:hover {{
+    background-color: {c['danger_hover']};
+}}
+QPushButton#IconDangerBtn {{
+    background-color: transparent;
+    color: {c['danger_fg']};
+    border: 1px solid {c['danger_b']};
+    border-radius: 7px;
+    padding: 0px;
+    font-size: 12px;
+    font-weight: 700;
+}}
+QPushButton#IconDangerBtn:hover {{
+    background-color: {c['danger_hover']};
+}}
+QLabel#Muted {{
+    color: {c['muted']};
+}}
+QLabel#MetaChip {{
+    background-color: {c['chip_bg']};
+    color: {c['chip_fg']};
+    border-radius: 6px;
+    padding: 3px 8px;
+    font-size: 11px;
+}}
+QLineEdit, QComboBox, QSpinBox {{
+    background-color: {c['inp_bg']};
+    color: {c['fg']};
+    border: 1px solid {c['inp_b']};
+    border-radius: 8px;
+    padding: 6px 10px;
+    font-size: 12px;
+}}
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus {{
+    border-color: #3B82F6;
+}}
+QComboBox {{
+    padding-right: 26px;
+}}
+QComboBox::drop-down {{
+    subcontrol-origin: padding;
+    subcontrol-position: top right;
+    width: 24px;
+    border: none;
+    background: transparent;
+}}
+QComboBox::down-arrow {{
+    image: url("{dn}");
+    width: 12px;
+    height: 12px;
+}}
+QComboBox QAbstractItemView {{
+    background-color: {c['card']};
+    color: {c['fg']};
+    border: 1px solid {c['btn_b']};
+    selection-background-color: #2563EB;
+    selection-color: #FFFFFF;
+    padding: 4px;
+    outline: none;
+}}
+QSpinBox {{
+    padding-right: 22px;
+}}
+QSpinBox::up-button {{
+    subcontrol-origin: border;
+    subcontrol-position: top right;
+    width: 20px;
+    border: none;
+    background: transparent;
+    margin-top: 2px;
+    margin-right: 2px;
+}}
+QSpinBox::down-button {{
+    subcontrol-origin: border;
+    subcontrol-position: bottom right;
+    width: 20px;
+    border: none;
+    background: transparent;
+    margin-bottom: 2px;
+    margin-right: 2px;
+}}
+QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
+    background-color: {c['nav_hover']};
+    border-radius: 4px;
+}}
+QSpinBox::up-arrow {{
+    image: url("{up}");
+    width: 10px;
+    height: 10px;
+}}
+QSpinBox::down-arrow {{
+    image: url("{dn}");
+    width: 10px;
+    height: 10px;
+}}
+QMenu {{
+    background-color: {c['menu_bg']};
+    color: {c['fg']};
+    border: 1px solid {c['btn_b']};
+    border-radius: 8px;
+    padding: 4px;
+}}
+QMenu::item {{
+    padding: 6px 14px;
+    border-radius: 5px;
+    font-size: 12px;
+}}
+QMenu::item:selected {{
+    background-color: #2563EB;
+    color: #FFFFFF;
+}}
+QToolTip {{
+    background-color: {c['menu_bg']};
+    color: {c['fg']};
+    border: 1px solid #3B82F6;
+    border-radius: 6px;
+    padding: 6px 8px;
+    font-size: 11px;
+}}
+QCheckBox {{
+    color: {c['fg']};
+    spacing: 8px;
+    font-size: 12px;
+}}
+QScrollBar:vertical {{
+    background: transparent;
+    width: 8px;
+}}
+QScrollBar::handle:vertical {{
+    background: {c['scroll_h']};
+    border-radius: 4px;
+    min-height: 24px;
+}}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+    height: 0px;
+}}
+"""
