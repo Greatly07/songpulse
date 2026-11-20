@@ -1,6 +1,8 @@
 # SongPulse
 
-A lightweight Windows desktop music identifier that listens directly to your PC's system audio—even while wearing headphones or using multiple audio outputs—with optional local AI voice & game SFX removal.
+A lightweight Windows desktop music identifier that listens directly to your PC's system audio, even while wearing headphones or using multiple audio outputs, and has an optional local AI voice & game SFX removal.
+
+<img width="720" alt="Identify Tab" src="https://github.com/user-attachments/assets/bf915661-93ea-4d7c-b8ae-2ecf3c65d5ac" />
 
 ---
 
@@ -13,14 +15,20 @@ A lightweight Windows desktop music identifier that listens directly to your PC'
 - **Optional Local AI Voice & SFX Removal:** Strips spoken dialogue, Discord chat, or game sound effects before scanning using a local UVR MDX-Net model (`UVR-MDX-NET-Inst_HQ_3.onnx`), with vocal-stem and raw-audio fallbacks.
 - **Smart GPU Load Guard:** Runs AI separation on your NVIDIA GPU (CUDA) when idle and automatically switches to CPU if GPU utilization exceeds your configured threshold (default `65%`) to avoid frame drops while gaming. Includes a built-in GPU/CPU speed test.
 - **Modern Fluent UI & System Tray Integration:**
-  - Live audio-reactive radial equalizer around the **Listen** button (hides cleanly when silent).
-  - Collapsible animated sidebar, **Always on Top** pin toggle, and automatic Windows Light/Dark theme matching (with manual overrides).
+  - Live audio-reactive radial equalizer around the **Listen** button.
+  - Collapsible sidebar, **Always on Top** pin toggle, and automatic Windows Light/Dark theme matching (with manual overrides).
   - Global keyboard shortcut (`Ctrl+Alt+S` by default) that works over fullscreen games and apps.
-  - Non-intrusive bottom-right status pill, forced bottom-right **Song Found** popup (bypasses Windows Do Not Disturb), and optional ping chime.
-  - Minimize to system tray, optional Windows auto-startup, and clean force-quit on close (`X`).
+  - Non-intrusive bottom-right status pill and optional ping chime.
+  - Minimize to system tray and optional Windows auto-startup.
 - **Searchable Library & Dynamic Song Details:**
   - Saves identified songs locally with portable album cover caching.
-  - Clicking any song opens a detailed view with a contrast-safe background gradient extracted from the album art, clickable Artist/Album links, track metadata (album, release date, genre, label, duration, ISRC, lyrics snippet), and a built-in **30-second audio preview player**.
+
+  <img width="720" alt="Library Tab" src="https://github.com/user-attachments/assets/460ec2ef-836a-48c8-a3d3-b4b2753c6786" />
+
+  - Clicking any song opens a detailed view with a background gradient extracted from the album art, clickable Artist/Album links, track metadata (album, release date, genre, label, duration, ISRC, lyrics snippet), and a built-in **30-second audio preview player**.
+
+  <img width="720" alt="Detailed View" src="https://github.com/user-attachments/assets/68917bbb-4f81-40f7-bf28-53218a732f38" />
+
   - Quick links to Shazam, YouTube, YouTube Music, Spotify, Apple Music, SoundCloud, Deezer, Amazon Music, and Tidal, plus one-click **Copy Link** and **Download with yt-dlp** integration.
 - **Built-in GitHub Update Checker:** Checks GitHub Releases directly from **Settings → Updates**.
 
@@ -36,7 +44,7 @@ A lightweight Windows desktop music identifier that listens directly to your PC'
 | **Metadata & Preview Enrichment** | iTunes Search API, YouTube Search                                                                     | Fetches 30-second audio previews, track duration, clickable artist/album pages, and direct `youtube.com/watch?v=` links                               |
 | **Local AI Separation**           | `audio-separator`, `UVR-MDX-NET-Inst_HQ_3.onnx`, `onnxruntime-gpu`, `torch`, `torchvision`, `librosa` | Local vocal/dialogue & SFX removal with CUDA GPU acceleration and automatic CPU fallback                                                              |
 | **Windows Integration**           | `keyboard`, `winotify`, `ctypes`, `winreg`, `winsound`, `nvidia-smi`                                  | Global shortcuts, Windows toast fallback, DWM dark titlebars, Always-on-Top pinning, startup registry entry, ping chime, and live GPU load monitoring |
-| **Packaging**                     | `PyInstaller`, `Inno Setup 6`                                                                         | Standalone `SongPulse.exe` bundle and per-user Windows installer                                                                                      |
+| **Packaging**                     | `PyInstaller`, `Inno Setup 7`                                                                         | Standalone `SongPulse.exe` bundle and per-user Windows installer                                                                                      |
 
 ---
 
@@ -45,7 +53,7 @@ A lightweight Windows desktop music identifier that listens directly to your PC'
 ### Option 1: Windows Installer (Recommended)
 
 1. Download `SongPulse_Setup_v1.0.0.exe` from the [Releases](https://github.com/Greatly07/songpulse/releases/latest) page.
-2. Run the installer (installs per-user to `%LOCALAPPDATA%\Programs\SongPulse`—no admin rights required).
+2. Run the installer (installs per-user to `%LOCALAPPDATA%\Programs\SongPulse`; no admin rights required).
 3. Launch **SongPulse** from your Start Menu.
 
 > **Note for GPU Acceleration:** AI Voice & SFX Removal works out of the box on CPU. For faster NVIDIA GPU acceleration (~1–2s), ensure you have an up-to-date NVIDIA driver and **CUDA Toolkit 13.x** installed.
