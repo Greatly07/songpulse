@@ -10,18 +10,23 @@ pyinstaller --noconfirm --onedir --windowed ^
   --name "SongPulse" ^
   --icon "songpulse.ico" ^
   --collect-submodules songpulse ^
-  --collect-data audio_separator ^
+  --collect-all audio_separator ^
+  --copy-metadata audio-separator ^
+  --collect-all librosa ^
+  --collect-all torchvision ^
+  --hidden-import torchvision._C ^
   --collect-all shazamio ^
   --collect-all shazamio_core ^
-  --collect-binaries onnxruntime ^
+  --collect-all onnxruntime ^
+  --exclude-module onnxruntime.quantization ^
   --hidden-import PyQt6.QtMultimedia ^
   --hidden-import _cffi_backend ^
   --hidden-import soundcard ^
   song_id_app.pyw
 
 echo [3/3] Compiling Inno Setup installer...
-set "ISCC=C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-if not exist "%ISCC%" set "ISCC=%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe"
+set "ISCC=C:\Program Files\Inno Setup 7\ISCC.exe"
+if not exist "%ISCC%" set "ISCC=%LOCALAPPDATA%\Programs\Inno Setup 7\ISCC.exe"
 
 if exist "%ISCC%" (
   "%ISCC%" SongPulse_Setup.iss

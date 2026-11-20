@@ -1678,7 +1678,13 @@ class SongPulseWindow(QMainWindow):
     def _on_model_failed(self, err):
         self.model_dot.setStyleSheet("color: #EF4444; font-size: 10px;")
         self.model_status_lbl.setText("AI unavailable")
-        self.ai_foot_widget.setToolTip("AI Cleanup unavailable")
+        self.ai_foot_widget.setToolTip(f"AI Cleanup unavailable:\n{err}")
+        try:
+            from .config import DATA_DIR
+            with open(os.path.join(DATA_DIR, "ai_error.log"), "w", encoding="utf-8") as f:
+                f.write(str(err))
+        except Exception:
+            pass
 
     def _on_quick_ai_toggled(self, state):
         enabled = state == Qt.CheckState.Checked.value
