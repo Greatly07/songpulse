@@ -5,6 +5,12 @@ cd /d "%~dp0"
 set "APP_VER=1.1.0"
 if not exist "release" mkdir "release"
 
+if exist "dist" (
+  echo [0/5] Clearing read-only attributes and old dist folder...
+  attrib -R /S /D "dist\*" >nul 2>&1
+  rmdir /s /q "dist"
+)
+
 echo [1/5] Generating songpulse.ico...
 python song_id_app.pyw --make-icon
 if errorlevel 1 (

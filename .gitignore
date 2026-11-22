@@ -9,3 +9,4 @@ data/
 !SongPulse_Core.spec
 *.wav
 *.onnx
+.vscode/
