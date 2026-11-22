@@ -3,9 +3,11 @@ import webbrowser
 
 from PyQt6.QtCore import (
     QEvent,
+    QMimeData,
     QPoint,
     QPointF,
     QRect,
+    QRectF,
     QSize,
     Qt,
     QTimer,
@@ -13,27 +15,31 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QAction,
+    QBrush,
     QColor,
+    QDrag,
     QFontMetrics,
+    QLinearGradient,
     QPainter,
+    QPainterPath,
     QPen,
+    QPolygonF,
+    QRadialGradient,
     QStandardItem,
     QStandardItemModel,
 )
 from PyQt6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QFrame,
     QGraphicsDropShadowEffect,
-    QHBoxLayout,
-    QApplication,
-    QComboBox,
-    QFrame,
     QHBoxLayout,
     QLabel,
     QLayout,
     QLineEdit,
     QMenu,
+    QProgressBar,
     QPushButton,
     QSizePolicy,
     QSpinBox,
@@ -41,9 +47,169 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from .config import set_window_always_on_top
-from .theme import rounded_pixmap
+from .audio import WAVEFORM_BARS
+from .config import APP_NAME, set_window_always_on_top
+from .theme import create_app_pixmap, render_blurred_pixmap, rounded_pixmap
 from .workers import build_song_platform_links
+
+
+def _paint_surface(painter: QPainter, rect: QRect, cfg: dict, cache_dict: dict, is_sidebar: bool = False):
+    """Paints solid color, angled linear gradient, or photo/cutout with glass overlay."""
+    mode = (cfg or {}).get("type", "solid")
+    c1 = QColor((cfg or {}).get("color1", "#111216"))
+    c2 = QColor((cfg or {}).get("color2", c1.name()))
+
+    # Always paint the base gradient/solid behind images so transparent PNG cutouts look seamless!
+    if mode == "gradient" or (mode == "image" and c1 != c2):
+        angle_rad = math.radians(float(cfg.get("angle", 135)))
+        cx, cy = rect.width() / 2.0, rect.height() / 2.0
+        dx = math.cos(angle_rad) * cx
+        dy = math.sin(angle_rad) * cy
+        grad = QLinearGradient(cx - dx, cy - dy, cx + dx, cy + dy)
+        grad.setColorAt(0.0, c1)
+        grad.setColorAt(1.0, c2)
+        painter.fillRect(rect, QBrush(grad))
+    else:
+        painter.fillRect(rect, c1)
+
+    if mode == "image" and (cfg or {}).get("image"):
+        img_path = cfg["image"]
+        blur = int(cfg.get("blur", 8 if is_sidebar else 6))
+        fit_mode = str(cfg.get("fit", "cover"))
+        key = (img_path, rect.width(), rect.height(), blur, fit_mode)
+        pix = cache_dict.get(key)
+        if pix is None:
+            cache_dict.clear()
+            pix = render_blurred_pixmap(
+                img_path, rect.width(), rect.height(), blur, fit_mode=fit_mode
+            )
+            cache_dict[key] = pix
+        if not pix.isNull():
+            painter.drawPixmap(rect.topLeft(), pix)
+            alpha = int(cfg.get("glass_alpha" if is_sidebar else "overlay_alpha", 115))
+            if alpha > 0:
+                overlay = QColor(c1.red(), c1.green(), c1.blue(), max(0, min(240, alpha)))
+                painter.fillRect(rect, overlay)
+
+
+class ThemedBackgroundWidget(QWidget):
+    """Root container that paints solid, gradient, or blurred photo theme backgrounds."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("Root")
+        self._bg_cfg = {"type": "solid", "color1": "#111216"}
+        self._pix_cache = {}
+
+    def set_background_config(self, cfg: dict):
+        self._bg_cfg = dict(cfg or {})
+        self._pix_cache.clear()
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        _paint_surface(p, self.rect(), self._bg_cfg, self._pix_cache, is_sidebar=False)
+        p.end()
+
+
+class GlassSidebarFrame(QFrame):
+    """Sidebar frame supporting solid, gradient, or iPhone-style lightly blurred frosted photo."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("Sidebar")
+        self._sb_cfg = {"type": "solid", "color1": "#17181D"}
+        self._pix_cache = {}
+
+    def set_sidebar_config(self, cfg: dict):
+        self._sb_cfg = dict(cfg or {})
+        self._pix_cache.clear()
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        _paint_surface(p, self.rect(), self._sb_cfg, self._pix_cache, is_sidebar=True)
+        # Subtle glass edge highlight on photo sidebars
+        if self._sb_cfg.get("type") == "image":
+            p.setPen(QPen(QColor(255, 255, 255, 34), 1))
+            p.drawLine(self.width() - 1, 0, self.width() - 1, self.height())
+        p.end()
+
+
+class LoadingSplash(QWidget):
+    """Compact startup window shown while SongPulse initializes."""
+
+    def __init__(self, dark: bool = True):
+        super().__init__(
+            None,
+            Qt.WindowType.SplashScreen
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint,
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setFixedSize(290, 118)
+
+        bg = "#151821" if dark else "#FFFFFF"
+        border = "#2D3244" if dark else "#CBD5E1"
+        fg = "#F8FAFC" if dark else "#0F172A"
+        muted = "#94A3B8" if dark else "#475569"
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(6, 6, 6, 6)
+
+        card = QFrame()
+        card.setStyleSheet(
+            f"QFrame {{ background-color: {bg}; border: 1px solid {border}; border-radius: 16px; }}"
+        )
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(18, 16, 18, 16)
+        lay.setSpacing(10)
+
+        top = QHBoxLayout()
+        top.setSpacing(12)
+        icon_lbl = QLabel()
+        icon_lbl.setPixmap(create_app_pixmap(38))
+        icon_lbl.setFixedSize(38, 38)
+        icon_lbl.setStyleSheet("border: none; background: transparent;")
+
+        txt_col = QVBoxLayout()
+        txt_col.setSpacing(2)
+        title = QLabel(f"Opening {APP_NAME}...")
+        title.setStyleSheet(
+            f"color: {fg}; font-size: 14px; font-weight: 700; border: none; background: transparent;"
+        )
+        sub = QLabel("Starting audio engine")
+        sub.setStyleSheet(
+            f"color: {muted}; font-size: 11px; border: none; background: transparent;"
+        )
+        txt_col.addWidget(title)
+        txt_col.addWidget(sub)
+
+        top.addWidget(icon_lbl)
+        top.addLayout(txt_col, 1)
+        lay.addLayout(top)
+
+        bar = QProgressBar()
+        bar.setRange(0, 0)
+        bar.setTextVisible(False)
+        bar.setFixedHeight(5)
+        bar.setStyleSheet(
+            f"QProgressBar {{ background: {'rgba(255,255,255,0.10)' if dark else 'rgba(15,23,42,0.08)'}; "
+            f"border: none; border-radius: 2px; }}"
+            f"QProgressBar::chunk {{ background: #3B82F6; border-radius: 2px; }}"
+        )
+        lay.addWidget(bar)
+        outer.addWidget(card)
+
+        screen = QApplication.primaryScreen()
+        if screen:
+            geo = screen.availableGeometry()
+            self.move(
+                geo.center().x() - self.width() // 2,
+                geo.center().y() - self.height() // 2,
+            )
 
 
 class ElidedLabel(QLabel):
@@ -66,6 +232,46 @@ class ElidedLabel(QLabel):
     def _update_elided(self):
         fm = QFontMetrics(self.font())
         avail = max(10, self.width() - 2)
+        elided = fm.elidedText(self._full_text, Qt.TextElideMode.ElideRight, avail)
+        super().setText(elided)
+
+
+class ElidedLinkButton(QPushButton):
+    """Clickable flat link button that cleanly elides overflowing text with '...'."""
+
+    def __init__(self, text="", parent=None):
+        super().__init__(parent)
+        self._full_text = text or ""
+        self.setFlat(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setText(self._full_text)
+
+    def setText(self, text: str):
+        self._full_text = text or ""
+        if not self.toolTip():
+            self.setToolTip(self._full_text)
+        self._update_elided()
+
+    def sizeHint(self):
+        fm = QFontMetrics(self.font())
+        w = fm.horizontalAdvance(self._full_text) + 12
+        h = max(22, fm.height() + 4)
+        return QSize(w, h)
+
+    def minimumSizeHint(self):
+        fm = QFontMetrics(self.font())
+        return QSize(0, max(22, fm.height() + 4))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_elided()
+
+    def _update_elided(self):
+        fm = QFontMetrics(self.font())
+        icon_pad = 18 if not self.icon().isNull() else 4
+        avail = max(24, self.width() - icon_pad)
         elided = fm.elidedText(self._full_text, Qt.TextElideMode.ElideRight, avail)
         super().setText(elided)
 
@@ -111,7 +317,7 @@ class FlowLayout(QLayout):
         return True
 
     def heightForWidth(self, width):
-        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
+        return self._do_layout(QRect(0, 0, max(1, width), 0), test_only=True)
 
     def setGeometry(self, rect):
         super().setGeometry(rect)
@@ -131,13 +337,15 @@ class FlowLayout(QLayout):
     def _do_layout(self, rect, test_only):
         m = self.contentsMargins()
         eff = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
+        avail_w = max(1, eff.width())
         x = eff.x()
         y = eff.y()
         line_height = 0
 
         for item in self._items:
-            w = item.sizeHint().width()
-            h = item.sizeHint().height()
+            hint = item.sizeHint()
+            w = min(hint.width(), avail_w)
+            h = hint.height()
             next_x = x + w + self._h_space
             if next_x - self._h_space > eff.right() and line_height > 0:
                 x = eff.x()
@@ -145,11 +353,64 @@ class FlowLayout(QLayout):
                 next_x = x + w + self._h_space
                 line_height = 0
             if not test_only:
-                item.setGeometry(QRect(QPoint(x, y), item.sizeHint()))
+                item.setGeometry(QRect(QPoint(x, y), QSize(w, h)))
             x = next_x
             line_height = max(line_height, h)
 
         return y + line_height - rect.y() + m.bottom()
+
+
+class FlowWidget(QWidget):
+    """Height-for-width container around FlowLayout so wrapped buttons resize parent cards cleanly."""
+
+    def __init__(self, h_spacing=6, v_spacing=6, parent=None):
+        super().__init__(parent)
+        self._flow = FlowLayout(self, margin=0, h_spacing=h_spacing, v_spacing=v_spacing)
+        self.setLayout(self._flow)
+        sp = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        sp.setHeightForWidth(True)
+        self.setSizePolicy(sp)
+        self.setMinimumWidth(0)
+
+    def addWidget(self, widget: QWidget):
+        self._flow.addWidget(widget)
+        self._sync_height()
+
+    def clear(self):
+        while self._flow.count():
+            it = self._flow.takeAt(0)
+            if it and it.widget():
+                it.widget().deleteLater()
+        self._sync_height()
+
+    def count(self) -> int:
+        return self._flow.count()
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        return self._flow.heightForWidth(max(1, width))
+
+    def sizeHint(self) -> QSize:
+        w = self.width() if self.width() > 20 else 420
+        return QSize(w, self.heightForWidth(w))
+
+    def minimumSizeHint(self) -> QSize:
+        w = self.width() if self.width() > 20 else 200
+        return QSize(0, self.heightForWidth(w))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._sync_height()
+
+    def _sync_height(self):
+        w = self.width()
+        if w > 10:
+            h = max(0, self._flow.heightForWidth(w))
+            if self.minimumHeight() != h or self.maximumHeight() != h:
+                self.setFixedHeight(h)
+        self.updateGeometry()
 
 
 class ResponsiveLinksBar(QWidget):
@@ -233,7 +494,7 @@ class ResponsiveLinksBar(QWidget):
 
 
 def get_song_link(song: dict) -> str:
-    """Returns the best direct URL for a song (direct YouTube video, Shazam, or YouTube search)."""
+    """Returns the best direct URL for a song."""
     if not song:
         return ""
     return (
@@ -252,6 +513,7 @@ class ClickableCard(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("SongCard")
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
         self._glow = QGraphicsDropShadowEffect(self)
@@ -277,10 +539,57 @@ class ClickableCard(QFrame):
         super().leaveEvent(event)
 
 
+class _CheckboxHitArea(QWidget):
+    """Expands clickable hitbox around a small QCheckBox without enlarging the visual box."""
+
+    def __init__(self, checkbox: QCheckBox, parent=None):
+        super().__init__(parent)
+        self.chk = checkbox
+        self.setFixedSize(36, 48)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setStyleSheet("background: transparent; border: none;")
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(checkbox)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.chk.toggle()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
 class HistoryRowCard(QFrame):
-    def __init__(self, song, p_icons, details_icon, on_details, on_delete, parent=None):
+    """Library song card with selection checkbox, Like heart, hover glow & optional manual reorder."""
+
+    selection_toggled = pyqtSignal(str, bool)
+    like_toggled = pyqtSignal(str)
+    move_requested = pyqtSignal(str, int)  # (song_id, -1 up or +1 down)
+    drop_reorder = pyqtSignal(str, str)  # (dragged_song_id, target_song_id)
+
+    def __init__(
+        self,
+        song,
+        p_icons,
+        details_icon,
+        on_details,
+        on_delete,
+        checked=False,
+        allow_reorder=False,
+        delete_tooltip="Remove from library",
+        parent=None,
+    ):
         super().__init__(parent)
         self.setObjectName("SongCard")
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
         self._glow = QGraphicsDropShadowEffect(self)
@@ -289,21 +598,61 @@ class HistoryRowCard(QFrame):
         self._glow.setColor(QColor(59, 130, 246, 135))
         self._glow.setEnabled(False)
         self.setGraphicsEffect(self._glow)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._compact = None
         self._link_btns = []
-        
+
         self._song = song
+        self._song_id = song.get("id", "")
         self._on_details = on_details
+        self._allow_reorder = bool(allow_reorder)
+        self._drag_start_pos = None
+        self.setAcceptDrops(self._allow_reorder)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
         row = QHBoxLayout(self)
-        row.setContentsMargins(10, 10, 10, 10)
-        row.setSpacing(10)
+        row.setContentsMargins(6, 7, 10, 7)
+        row.setSpacing(6)
+
+        # Selection checkbox
+        self.select_chk = QCheckBox()
+        self.select_chk.setChecked(checked)
+        self.select_chk.setFixedSize(16, 16)
+        self.select_chk.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.select_chk.setToolTip("Select song")
+        self.select_chk.stateChanged.connect(
+            lambda st: self.selection_toggled.emit(
+                self._song_id, st == Qt.CheckState.Checked.value
+            )
+        )
+        self._chk_hit = _CheckboxHitArea(self.select_chk)
+        row.addWidget(self._chk_hit)
+
+        # Optional manual reorder handle (up/down) for custom playlists
+        if self._allow_reorder:
+            mv_col = QVBoxLayout()
+            mv_col.setContentsMargins(0, 0, 0, 0)
+            mv_col.setSpacing(1)
+            up_btn = QPushButton("▲")
+            up_btn.setObjectName("SubtleIconBtn")
+            up_btn.setFixedSize(18, 16)
+            up_btn.setToolTip("Move up (or drag card)")
+            up_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            up_btn.clicked.connect(lambda: self.move_requested.emit(self._song_id, -1))
+
+            dn_btn = QPushButton("▼")
+            dn_btn.setObjectName("SubtleIconBtn")
+            dn_btn.setFixedSize(18, 16)
+            dn_btn.setToolTip("Move down (or drag card)")
+            dn_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            dn_btn.clicked.connect(lambda: self.move_requested.emit(self._song_id, 1))
+
+            mv_col.addWidget(up_btn)
+            mv_col.addWidget(dn_btn)
+            row.addLayout(mv_col)
 
         cover = QLabel()
-        cover.setFixedSize(48, 48)
-        cover.setPixmap(rounded_pixmap(song.get("cover_path", ""), 48, 8))
+        cover.setFixedSize(46, 46)
+        cover.setPixmap(rounded_pixmap(song.get("cover_path", ""), 46, 8))
         row.addWidget(cover)
 
         text_col = QVBoxLayout()
@@ -335,6 +684,20 @@ class HistoryRowCard(QFrame):
         text_col.addWidget(sub_lbl)
         text_col.addWidget(ts_lbl)
         row.addLayout(text_col, 1)
+
+        # Like heart button
+        liked = bool(song.get("liked", False))
+        self.like_btn = QPushButton("♥" if liked else "♡")
+        self.like_btn.setObjectName("SubtleIconBtn")
+        self.like_btn.setFixedSize(28, 28)
+        self.like_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.like_btn.setToolTip("Remove from Liked Songs" if liked else "Add to Liked Songs")
+        if liked:
+            self.like_btn.setStyleSheet("color: #F43F5E; font-size: 15px;")
+        else:
+            self.like_btn.setStyleSheet("font-size: 15px;")
+        self.like_btn.clicked.connect(lambda: self.like_toggled.emit(self._song_id))
+        row.addWidget(self.like_btn)
 
         all_links = build_song_platform_links(song)
         for pname, icon_key, url in all_links[:2]:
@@ -374,16 +737,21 @@ class HistoryRowCard(QFrame):
         del_btn = QPushButton("✕")
         del_btn.setObjectName("IconDangerBtn")
         del_btn.setFixedSize(28, 28)
-        del_btn.setToolTip("Remove from library")
+        del_btn.setToolTip(delete_tooltip)
         del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        del_btn.clicked.connect(lambda checked=False: on_delete(song.get("id")))
+        del_btn.clicked.connect(lambda checked=False: on_delete(self._song_id))
         row.addWidget(del_btn)
 
         self._apply_compact_mode(False)
 
+    def set_checked_silent(self, checked: bool):
+        self.select_chk.blockSignals(True)
+        self.select_chk.setChecked(checked)
+        self.select_chk.blockSignals(False)
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self._apply_compact_mode(self.width() < 620)
+        self._apply_compact_mode(self.width() < 680)
 
     def _apply_compact_mode(self, compact: bool):
         if compact == self._compact:
@@ -413,9 +781,54 @@ class HistoryRowCard(QFrame):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            self._on_details(self._song)
+            self._drag_start_pos = event.position().toPoint()
             return
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if (
+            self._allow_reorder
+            and self._drag_start_pos is not None
+            and (event.buttons() & Qt.MouseButton.LeftButton)
+        ):
+            dist = (event.position().toPoint() - self._drag_start_pos).manhattanLength()
+            if dist >= QApplication.startDragDistance():
+                self._drag_start_pos = None
+                drag = QDrag(self)
+                mime = QMimeData()
+                mime.setData("application/x-songpulse-id", self._song_id.encode("utf-8"))
+                drag.setMimeData(mime)
+                drag.exec(Qt.DropAction.MoveAction)
+                return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self._drag_start_pos is not None:
+            self._drag_start_pos = None
+            self._on_details(self._song)
+            return
+        super().mouseReleaseEvent(event)
+
+    def dragEnterEvent(self, event):
+        if self._allow_reorder and event.mimeData().hasFormat("application/x-songpulse-id"):
+            event.acceptProposedAction()
+            self._glow.setEnabled(True)
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event):
+        self._glow.setEnabled(False)
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event):
+        self._glow.setEnabled(False)
+        if self._allow_reorder and event.mimeData().hasFormat("application/x-songpulse-id"):
+            dragged = bytes(event.mimeData().data("application/x-songpulse-id")).decode("utf-8", errors="ignore")
+            if dragged and dragged != self._song_id:
+                self.drop_reorder.emit(dragged, self._song_id)
+            event.acceptProposedAction()
+        else:
+            event.ignore()
 
     def enterEvent(self, event):
         self._glow.setEnabled(True)
@@ -427,26 +840,99 @@ class HistoryRowCard(QFrame):
 
 
 class PulseIdentifyWidget(QWidget):
-    """Circular Identify button surrounded by 28 thick, sleek pill equalizer bars (hidden when silent)."""
+    """Customizable Identify button + live audio waveform (radial, horizontal split, bottom bar, or dots)."""
 
     clicked = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedSize(228, 228)
         self._phase = 0.0
         self._scanning = False
         self._dark = True
-        self._bar_count = 28
+        self._bar_count = WAVEFORM_BARS
         self._bars = [0.0] * self._bar_count
+        self._bars_l = [0.0] * self._bar_count
+        self._bars_r = [0.0] * self._bar_count
         self._energy = 0.0
+        self._audio_active = False
+        self._vis_alpha = 0.0
+
+        # Customizable waveform properties
+        self._wf_style = "radial"  # "radial", "horizontal", "pulse_line", "bar", "dots"
+        self._wf_mirror = False
+        self._wf_idle_dots = False
+        self._wf_flip_hz = False
+        self._wf_hair_ties = False
+        self._wf_right_alt_white = False
+        self._wf_teto_bow = False
+        self._wf_max_width = 620
+        self._color1 = QColor("#3B82F6")
+        self._color2 = QColor("#8B5CF6")
 
         self.btn = QPushButton("Listen", self)
         self.btn.setObjectName("IdentifyBtn")
         self.btn.setFixedSize(132, 132)
-        self.btn.move((228 - 132) // 2, (228 - 132) // 2)
         self.btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn.clicked.connect(self.clicked.emit)
+
+        self._apply_geometry_mode()
+
+    def configure_waveform(
+        self,
+        style: str = "radial",
+        mirror: bool = False,
+        idle_dots: bool = False,
+        max_width: int = 620,
+        color1: str = "#3B82F6",
+        color2: str = "#8B5CF6",
+        flip_hz: bool = False,
+        hair_ties: bool = False,
+        right_alt_white: bool = False,
+        teto_bow: bool = False,
+    ):
+        self._wf_style = (
+            style
+            if style in ("radial", "horizontal", "pulse_line", "bar", "dots")
+            else "radial"
+        )
+        self._wf_mirror = bool(mirror)
+        self._wf_idle_dots = bool(idle_dots)
+        self._wf_flip_hz = bool(flip_hz)
+        self._wf_hair_ties = bool(hair_ties)
+        self._wf_right_alt_white = bool(right_alt_white)
+        self._wf_teto_bow = bool(teto_bow)
+        self._wf_max_width = max(260, min(960, int(max_width or 620)))
+        self._color1 = QColor(color1 or "#3B82F6")
+        self._color2 = QColor(color2 or "#8B5CF6")
+        self._apply_geometry_mode()
+        self.update()
+
+    def _apply_geometry_mode(self):
+        if self._wf_style in ("horizontal", "pulse_line"):
+            self.setMinimumSize(240, 184)
+            self.setMaximumSize(self._wf_max_width, 184)
+            self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        elif self._wf_style == "bar":
+            self.setMinimumSize(240, 218)
+            self.setMaximumSize(self._wf_max_width, 218)
+            self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        else:
+            self.setMinimumSize(236, 236)
+            self.setMaximumSize(236, 236)
+            self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self._center_button()
+
+    def _center_button(self):
+        bx = (self.width() - self.btn.width()) // 2
+        if self._wf_style == "bar":
+            by = 12
+        else:
+            by = (self.height() - self.btn.height()) // 2
+        self.btn.move(max(0, bx), max(0, by))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._center_button()
 
     def setText(self, text: str):
         self.btn.setText(text)
@@ -463,84 +949,572 @@ class PulseIdentifyWidget(QWidget):
 
     def clear_waveform(self):
         self._bars = [0.0] * self._bar_count
+        self._bars_l = [0.0] * self._bar_count
+        self._bars_r = [0.0] * self._bar_count
         self._energy = 0.0
+        self._audio_active = False
+        self._vis_alpha = 0.0
         self.update()
 
-    def step_animation(self, spectrum_bands, rms_level, has_outputs=True):
+    def step_animation(
+        self,
+        spectrum_bands,
+        rms_level,
+        has_outputs=True,
+        left_bands=None,
+        right_bands=None,
+    ):
         if not has_outputs and not self._scanning:
-            if self._energy > 0.0 or any(b > 0.0 for b in self._bars):
-                self.clear_waveform()
+            self._audio_active = False
+            self._vis_alpha = max(0.0, self._vis_alpha - 0.08)
+            if (
+                self._energy > 0.0
+                or any(b > 0.0 for b in self._bars)
+                or any(b > 0.0 for b in self._bars_l)
+                or any(b > 0.0 for b in self._bars_r)
+            ):
+                self._bars = [b * 0.80 if b > 0.005 else 0.0 for b in self._bars]
+                self._bars_l = [b * 0.80 if b > 0.005 else 0.0 for b in self._bars_l]
+                self._bars_r = [b * 0.80 if b > 0.005 else 0.0 for b in self._bars_r]
+                self._energy *= 0.80
+                self.update()
+            elif self._wf_idle_dots or self._vis_alpha > 0.0:
+                self.update()
             return
 
-        self._phase += 0.16 if self._scanning else 0.06
-        self._energy = self._energy * 0.72 + rms_level * 0.28
+        # Whilst listening (scanning), glide smoothly and slowly
+        if self._scanning:
+            self._phase += 0.055
+            self._audio_active = True
+            self._vis_alpha = min(1.0, self._vis_alpha + 0.14)
+            self._energy = self._energy * 0.90 + 0.55 * 0.10
+            n = self._bar_count
+            for i in range(n):
+                wave = 0.5 + 0.5 * math.sin(self._phase * 1.45 + i * 0.42)
+                target = 0.18 + 0.58 * wave
+                val = self._bars[i] * 0.86 + target * 0.14
+                self._bars[i] = val
+                self._bars_l[i] = val
+                self._bars_r[i] = val
+            self.update()
+            return
 
-        n = self._bar_count
-        for i in range(n):
-            if self._scanning:
-                angle_wave = 0.5 + 0.5 * math.sin(self._phase * 2.0 + i * 0.55)
-                target = 0.22 + 0.62 * angle_wave
-            elif spectrum_bands is not None and len(spectrum_bands) == n:
-                live_val = float(spectrum_bands[i])
-                target = min(1.0, live_val) if live_val >= 0.04 else 0.0
-            else:
-                target = 0.0
+        self._phase += 0.08
+        self._energy = self._energy * 0.65 + rms_level * 0.35
+        has_sound = bool(
+            rms_level >= 0.0008
+            and spectrum_bands is not None
+            and any(float(v) >= 0.02 for v in spectrum_bands)
+        )
+        self._audio_active = has_sound
 
-            alpha = 0.55 if target > self._bars[i] else 0.24
-            val = self._bars[i] * (1.0 - alpha) + target * alpha
-            self._bars[i] = 0.0 if val < 0.025 else val
+        # Fade visibility smoothly between audio and silence
+        target_vis = 1.0 if has_sound else 0.0
+        vis_rate = 0.28 if target_vis > self._vis_alpha else 0.08
+        self._vis_alpha = self._vis_alpha * (1.0 - vis_rate) + target_vis * vis_rate
+        if self._vis_alpha < 0.01 and not has_sound:
+            self._vis_alpha = 0.0
+
+        src_l = left_bands if (left_bands is not None and len(left_bands) == self._bar_count) else spectrum_bands
+        src_r = right_bands if (right_bands is not None and len(right_bands) == self._bar_count) else spectrum_bands
+
+        def _smooth_step(arr, src):
+            n = self._bar_count
+            for i in range(n):
+                if has_sound and src is not None and len(src) == n:
+                    live_val = float(src[i])
+                    target = min(1.0, live_val) if live_val >= 0.015 else 0.0
+                else:
+                    target = 0.0
+
+                cur = arr[i]
+                if target > cur:
+                    alpha = 0.72
+                else:
+                    alpha = 0.14 + 0.28 * cur
+                val = cur * (1.0 - alpha) + target * alpha
+                arr[i] = 0.0 if val < 0.004 else val
+
+        _smooth_step(self._bars, spectrum_bands)
+        _smooth_step(self._bars_l, src_l)
+        _smooth_step(self._bars_r, src_r)
 
         self.update()
+
+    def _bar_color(self, blend: float) -> tuple[int, int, int]:
+        r = int(self._color1.red() + (self._color2.red() - self._color1.red()) * blend)
+        g = int(self._color1.green() + (self._color2.green() - self._color1.green()) * blend)
+        b = int(self._color1.blue() + (self._color2.blue() - self._color1.blue()) * blend)
+        return r, g, b
+
+    def _effective_bars(self, count: int) -> list[float]:
+        src = self._bars
+        n = len(src)
+        if self._wf_mirror and count >= 2:
+            half_c = count // 2
+            half = [src[int((i / max(1, half_c)) * n) % n] for i in range(half_c)]
+            if count % 2 == 1:
+                return half + [half[-1]] + half[::-1]
+            return half + half[::-1]
+        return [src[int((i / max(1, count)) * n) % n] for i in range(count)]
 
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         cx = self.width() / 2.0
-        cy = self.height() / 2.0
-        inner_r = 74.0
-        max_bar_len = 32.0
+        cy = self.btn.y() + self.btn.height() / 2.0
 
-        # Subtle pulsing halo when scanning or loud audio plays
-        ripple_strength = 1.0 if self._scanning else min(0.75, self._energy * 1.5)
+        if self._wf_style == "horizontal":
+            self._paint_horizontal_split(p, cx, cy)
+            if self._wf_hair_ties:
+                self._paint_miku_hair_ties(p, cx, cy)
+        elif self._wf_style == "pulse_line":
+            self._paint_pulse_line(p, cx, cy)
+            if self._wf_hair_ties:
+                self._paint_miku_hair_ties(p, cx, cy)
+        elif self._wf_style == "bar":
+            self._paint_bottom_bar(p, cx)
+        elif self._wf_style == "dots":
+            self._paint_dots_ring(p, cx, cy)
+        else:
+            self._paint_radial(p, cx, cy)
+
+        if self._wf_teto_bow:
+            self._paint_teto_bow(p, cx, cy)
+
+        # Breathing glow around the Listen button while scanning
+        if self._scanning:
+            pulse = 0.5 + 0.5 * math.sin(self._phase * 1.45)
+            glow_r = 76.0 + pulse * 8.0
+            rg = QRadialGradient(QPointF(cx, cy), glow_r)
+            c1 = QColor(self._color1)
+            c2 = QColor(self._color2)
+            c1.setAlpha(int(76 + pulse * 46))
+            c2.setAlpha(int(30 + pulse * 24))
+            rg.setColorAt(0.0, c1)
+            rg.setColorAt(0.70, c1)
+            rg.setColorAt(0.86, c2)
+            rg.setColorAt(1.0, QColor(c2.red(), c2.green(), c2.blue(), 0))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(rg))
+            p.drawEllipse(QPointF(cx, cy), glow_r, glow_r)
+
+        p.end()
+
+    def _paint_miku_hair_ties(self, p: QPainter, cx: float, cy: float):
+        """Draws Miku's thick black-and-pink diamond ponytail ornaments centered right on the left & right sides of the Listen button."""
+        p.save()
+        clip = QPainterPath()
+        clip.addRect(0.0, 0.0, float(self.width()), float(self.height()))
+        btn_hole = QPainterPath()
+        btn_hole.addEllipse(QPointF(cx, cy), 65.5, 65.5)
+        p.setClipPath(clip.subtracted(btn_hole))
+
+        rx = 18.0
+        ry = 30.0
+        for side in (-1, 1):
+            dcx = cx + side * 66.0
+            pts = QPolygonF(
+                [
+                    QPointF(dcx, cy - ry),
+                    QPointF(dcx + rx, cy),
+                    QPointF(dcx, cy + ry),
+                    QPointF(dcx - rx, cy),
+                ]
+            )
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(
+                QPen(
+                    QColor(244, 63, 94, 72),
+                    13.0,
+                    Qt.PenStyle.SolidLine,
+                    Qt.PenCapStyle.SquareCap,
+                    Qt.PenJoinStyle.MiterJoin,
+                )
+            )
+            p.drawPolygon(pts)
+            p.setPen(
+                QPen(
+                    QColor("#141720"),
+                    9.4,
+                    Qt.PenStyle.SolidLine,
+                    Qt.PenCapStyle.SquareCap,
+                    Qt.PenJoinStyle.MiterJoin,
+                )
+            )
+            p.drawPolygon(pts)
+            p.setPen(
+                QPen(
+                    QColor("#F43F5E"),
+                    3.6,
+                    Qt.PenStyle.SolidLine,
+                    Qt.PenCapStyle.SquareCap,
+                    Qt.PenJoinStyle.MiterJoin,
+                )
+            )
+            p.drawPolygon(pts)
+
+        p.restore()
+
+    def _paint_teto_bow(self, p: QPainter, cx: float, cy: float):
+        """Draws Kasane Teto's white double-ear ribbon hairtie perched on the top-right of the Listen button."""
+        p.save()
+        clip = QPainterPath()
+        clip.addRect(0.0, 0.0, float(self.width()), float(self.height()))
+        btn_hole = QPainterPath()
+        btn_hole.addEllipse(QPointF(cx, cy), 65.0, 65.0)
+        p.setClipPath(clip.subtracted(btn_hole))
+
+        p.translate(cx + 47.0, cy - 44.5)
+        p.rotate(30.0)
+
+        # Left/inner shorter pointed white ribbon ear
+        ear_left = QPainterPath()
+        ear_left.moveTo(0.0, 2.0)
+        ear_left.cubicTo(-13.0, -7.0, -18.0, -18.0, -11.0, -31.0)
+        ear_left.cubicTo(-4.0, -22.0, 0.0, -12.0, 4.0, -1.0)
+        ear_left.closeSubpath()
+
+        # Right/main taller pointed white ribbon ear sweeping upward-right
+        ear_right = QPainterPath()
+        ear_right.moveTo(1.0, -1.0)
+        ear_right.cubicTo(3.0, -18.0, 10.0, -30.0, 20.0, -38.0)
+        ear_right.cubicTo(24.0, -23.0, 21.0, -10.0, 8.0, 4.0)
+        ear_right.closeSubpath()
+
+        # Soft white outer halo so the bow lifts cleanly off the dark crimson background
+        glow_pen = QPen(
+            QColor(255, 245, 248, 56),
+            7.0,
+            Qt.PenStyle.SolidLine,
+            Qt.PenCapStyle.RoundCap,
+            Qt.PenJoinStyle.RoundJoin,
+        )
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(glow_pen)
+        p.drawPath(ear_left)
+        p.drawPath(ear_right)
+
+        # Crisp anime ink outline + bright white gradient fill for both ears
+        outline_pen = QPen(
+            QColor("#1A1116"),
+            2.2,
+            Qt.PenStyle.SolidLine,
+            Qt.PenCapStyle.RoundCap,
+            Qt.PenJoinStyle.RoundJoin,
+        )
+        grad_l = QLinearGradient(QPointF(-12.0, -30.0), QPointF(2.0, 2.0))
+        grad_l.setColorAt(0.0, QColor("#FFFFFF"))
+        grad_l.setColorAt(0.72, QColor("#F1F5F9"))
+        grad_l.setColorAt(1.0, QColor("#CBD5E1"))
+        p.setPen(outline_pen)
+        p.setBrush(QBrush(grad_l))
+        p.drawPath(ear_left)
+
+        grad_r = QLinearGradient(QPointF(18.0, -36.0), QPointF(5.0, 3.0))
+        grad_r.setColorAt(0.0, QColor("#FFFFFF"))
+        grad_r.setColorAt(0.68, QColor("#F8FAFC"))
+        grad_r.setColorAt(1.0, QColor("#CBD5E1"))
+        p.setBrush(QBrush(grad_r))
+        p.drawPath(ear_right)
+
+        # Subtle silver crease lines inside the ribbon loops
+        crease_pen = QPen(QColor("#94A3B8"), 1.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(crease_pen)
+        fold_l = QPainterPath()
+        fold_l.moveTo(-2.0, -3.0)
+        fold_l.quadTo(-9.0, -13.0, -9.5, -22.0)
+        p.drawPath(fold_l)
+        fold_r = QPainterPath()
+        fold_r.moveTo(6.0, -3.0)
+        fold_r.quadTo(12.0, -16.0, 16.5, -28.0)
+        p.drawPath(fold_r)
+
+        # Small rounded ribbon knot sitting on the top-right curve of the button
+        p.save()
+        p.translate(4.0, 0.5)
+        p.rotate(42.0)
+        knot_grad = QLinearGradient(QPointF(-6.0, -5.0), QPointF(6.0, 5.0))
+        knot_grad.setColorAt(0.0, QColor("#FFFFFF"))
+        knot_grad.setColorAt(1.0, QColor("#CBD5E1"))
+        p.setPen(outline_pen)
+        p.setBrush(QBrush(knot_grad))
+        p.drawRoundedRect(QRectF(-7.5, -4.8, 15.0, 9.6), 4.2, 4.2)
+        p.restore()
+
+        p.restore()
+
+    def _paint_radial(self, p: QPainter, cx: float, cy: float):
+        inner_r = 75.0
+        max_bar_len = 29.0
+
+        ripple_strength = 0.85 if self._scanning else min(0.75, self._energy * 1.5)
         if ripple_strength > 0.08:
             for ring_idx in range(2):
-                prog = (self._phase * 0.28 + ring_idx * 0.5) % 1.0
+                prog = (self._phase * 0.25 + ring_idx * 0.5) % 1.0
                 radius = inner_r + prog * 34.0
-                alpha = int((1.0 - prog) * 90 * ripple_strength)
-                ring_color = QColor("#60A5FA" if self._dark else "#2563EB")
+                alpha = int((1.0 - prog) * 85 * ripple_strength)
+                ring_color = QColor(self._color1)
                 ring_color.setAlpha(max(0, min(255, alpha)))
                 p.setPen(QPen(ring_color, 1.8))
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.drawEllipse(QPointF(cx, cy), radius, radius)
 
-        # Draw thick, smooth rounded equalizer pills only for active bands
-        for i, amp in enumerate(self._bars):
-            if amp < 0.03:
-                continue
+        vis = 1.0 if self._wf_idle_dots else self._vis_alpha
+        if vis <= 0.01:
+            return
+
+        bars = self._effective_bars(self._bar_count)
+        for i, amp in enumerate(bars):
             theta = (2.0 * math.pi * i) / self._bar_count - (math.pi / 2.0)
-            bar_len = 3.0 + amp * max_bar_len
+            blend = 0.5 + 0.5 * math.sin(theta + self._phase * 0.35)
+            r, g, b = self._bar_color(blend)
+
+            bar_len = amp * max_bar_len
             x1 = cx + math.cos(theta) * inner_r
             y1 = cy + math.sin(theta) * inner_r
             x2 = cx + math.cos(theta) * (inner_r + bar_len)
             y2 = cy + math.sin(theta) * (inner_r + bar_len)
 
+            core_w = 6.8 + min(1.0, amp * 3.0) * 3.2
+            glow_w = core_w + 4.4
+            glow_a = int((28 + amp * 68) * vis)
+            core_a = int((165 + min(90, amp * 105)) * vis)
+
+            p.setPen(QPen(QColor(r, g, b, glow_a), glow_w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawLine(QPointF(x1, y1), QPointF(x2, y2))
+
+            p.setPen(QPen(QColor(r, g, b, core_a), core_w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawLine(QPointF(x1, y1), QPointF(x2, y2))
+
+    def _paint_horizontal_split(self, p: QPainter, cx: float, cy: float):
+        """Two-way up-down vertical pill bars extending left & right of Listen button (Miku style)."""
+        btn_gap = 102.0 if self._wf_hair_ties else 80.0
+        step = 16.0
+        usable_w = min(self.width(), self._wf_max_width)
+        side_avail = max(0.0, (usable_w / 2.0) - btn_gap - 10.0)
+        bars_per_side = max(0, min(14, int(side_avail // step)))
+        if bars_per_side == 0:
+            return
+
+        vis = 1.0 if self._wf_idle_dots else self._vis_alpha
+        if vis <= 0.01:
+            return
+
+        # Miku theme: subtle thin straight gray centerline connecting the Listen button behind & between waveforms
+        if self._wf_hair_ties:
+            end_x_dist = btn_gap + (bars_per_side - 1) * step
+            p.setPen(QPen(QColor(186, 200, 214, 72), 0.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            for side in (-1, 1):
+                p.drawLine(
+                    QPointF(cx + side * 66.0, cy),
+                    QPointF(cx + side * end_x_dist, cy),
+                )
+
+        max_half_h = 46.0
+
+        for side in (-1, 1):
+            # True stereo L/R: left bars react to Left audio channel, right bars to Right channel
+            channel_bars = self._bars_l if side == -1 else self._bars_r
+            n_src = len(channel_bars)
+            for idx in range(bars_per_side):
+                x = cx + side * (btn_gap + idx * step)
+                pos_idx = (bars_per_side - 1 - idx) if self._wf_flip_hz else idx
+                src_i = int((pos_idx / max(1, bars_per_side)) * n_src) % n_src
+                amp = channel_bars[src_i]
+
+                if self._wf_flip_hz and bars_per_side > 1:
+                    t_out = idx / float(bars_per_side - 1)
+                    amp = min(1.0, amp * (0.68 + 0.42 * t_out))
+
+                blend = idx / max(1, bars_per_side - 1) if bars_per_side > 1 else 0.5
+                if self._wf_right_alt_white and side == 1 and (idx % 2 == 1):
+                    r, g, b = 248, 250, 252
+                else:
+                    r, g, b = self._bar_color(blend)
+
+                half_h = max(0.1, amp * max_half_h)
+                active_factor = min(1.0, amp * 4.0)
+                core_w = 6.2 + active_factor * 1.4
+                glow_w = core_w + 4.5
+
+                # When idle (silent) with idle_dots on, softly dim the resting dots
+                idle_dim = 0.62 + 0.38 * self._vis_alpha if self._wf_idle_dots else vis
+                glow_a = int((26 + amp * 72) * idle_dim)
+                core_a = int((175 + min(80, amp * 85)) * idle_dim)
+
+                p.setPen(QPen(QColor(r, g, b, glow_a), glow_w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                p.drawLine(QPointF(x, cy - half_h), QPointF(x, cy + half_h))
+
+                p.setPen(QPen(QColor(r, g, b, core_a), core_w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                p.drawLine(QPointF(x, cy - half_h), QPointF(x, cy + half_h))
+
+    def _paint_pulse_line(self, p: QPainter, cx: float, cy: float):
+        """Continuous stereo L/R zig-zag oscilloscope pulse line flowing from inside Listen button and fading out at outer edges."""
+        start_gap = 60.0
+        step = 9.2
+        usable_w = min(self.width(), self._wf_max_width)
+        side_avail = max(0.0, (usable_w / 2.0) - start_gap - 8.0)
+        peaks_per_side = max(0, min(28, int(side_avail // step)))
+        if peaks_per_side < 2:
+            return
+
+        vis = 1.0 if self._wf_idle_dots else self._vis_alpha
+        if vis <= 0.01:
+            return
+
+        end_dist = start_gap + (peaks_per_side - 1) * step
+
+        p.save()
+        clip = QPainterPath()
+        clip.addRect(0.0, 0.0, float(self.width()), float(self.height()))
+        btn_hole = QPainterPath()
+        btn_hole.addEllipse(QPointF(cx, cy), 65.0, 65.0)
+        p.setClipPath(clip.subtracted(btn_hole))
+
+        # Miku subtle light gray centerline behind the waveform, fading out cleanly toward the outside
+        if self._wf_hair_ties:
+            for side in (-1, 1):
+                lx0 = cx + side * 65.0
+                lx1 = cx + side * end_dist
+                line_grad = QLinearGradient(QPointF(lx0, cy), QPointF(lx1, cy))
+                line_grad.setColorAt(0.0, QColor(186, 200, 214, 72))
+                line_grad.setColorAt(0.88, QColor(186, 200, 214, 68))
+                line_grad.setColorAt(1.0, QColor(186, 200, 214, 0))
+                p.setPen(
+                    QPen(
+                        QBrush(line_grad),
+                        0.8,
+                        Qt.PenStyle.SolidLine,
+                        Qt.PenCapStyle.FlatCap,
+                    )
+                )
+                p.drawLine(QPointF(lx0, cy), QPointF(lx1, cy))
+
+        max_amp = 50.0
+        idle_dim = 0.65 + 0.35 * self._vis_alpha if self._wf_idle_dots else vis
+
+        def _sample_bar(src_bars, norm_pos: float) -> float:
+            n_src = len(src_bars)
+            if n_src <= 1:
+                return src_bars[0] if n_src == 1 else 0.0
+            f = max(0.0, min(float(n_src - 1), norm_pos * (n_src - 1)))
+            i0 = int(f)
+            i1 = min(n_src - 1, i0 + 1)
+            frac = f - i0
+            return src_bars[i0] * (1.0 - frac) + src_bars[i1] * frac
+
+        for side in (-1, 1):
+            # True stereo: left side reacts strictly to Left audio channel, right side to Right channel
+            channel_bars = self._bars_l if side == -1 else self._bars_r
+            path = QPainterPath()
+            path.moveTo(cx + side * (start_gap - step), cy)
+
+            for idx in range(peaks_per_side):
+                x = cx + side * (start_gap + idx * step)
+                pos_idx = (peaks_per_side - 1 - idx) if self._wf_flip_hz else idx
+                norm = pos_idx / float(max(1, peaks_per_side - 1))
+
+                amp = _sample_bar(channel_bars, norm)
+                if self._wf_flip_hz and peaks_per_side > 1:
+                    t_out = idx / float(peaks_per_side - 1)
+                    amp = min(1.0, amp * (0.68 + 0.42 * t_out))
+
+                # Alternate peaks up and down across the centerline
+                sign = -1.0 if (idx % 2 == 0) else 1.0
+                y = cy + sign * amp * max_amp
+                path.lineTo(x, y)
+
+            x_in = cx + side * 66.0
+            x_out = cx + side * end_dist
+
+            # Tight soft neon glow fading out smoothly at the outer end
+            glow_grad = QLinearGradient(QPointF(x_in, cy), QPointF(x_out, cy))
+            g1 = QColor(self._color1)
+            g2 = QColor(self._color2)
+            g3 = QColor(self._color2)
+            g1.setAlpha(int(64 * idle_dim))
+            g2.setAlpha(int(74 * idle_dim))
+            g3.setAlpha(0)
+            glow_grad.setColorAt(0.0, g1)
+            glow_grad.setColorAt(0.90, g2)
+            glow_grad.setColorAt(1.0, g3)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            glow_pen = QPen(
+                QBrush(glow_grad),
+                4.6,
+                Qt.PenStyle.SolidLine,
+                Qt.PenCapStyle.RoundCap,
+                Qt.PenJoinStyle.RoundJoin,
+            )
+            p.setPen(glow_pen)
+            p.drawPath(path)
+
+            # Thin, smooth bright core pulse line fading out smoothly at the outer end
+            core_grad = QLinearGradient(QPointF(x_in, cy), QPointF(x_out, cy))
+            c1 = QColor(self._color1)
+            c2 = QColor(self._color2)
+            c3 = QColor(self._color2)
+            c1.setAlpha(int(245 * idle_dim))
+            c2.setAlpha(int(250 * idle_dim))
+            c3.setAlpha(0)
+            core_grad.setColorAt(0.0, c1)
+            core_grad.setColorAt(0.90, c2)
+            core_grad.setColorAt(1.0, c3)
+            core_pen = QPen(
+                QBrush(core_grad),
+                3.0,
+                Qt.PenStyle.SolidLine,
+                Qt.PenCapStyle.RoundCap,
+                Qt.PenJoinStyle.RoundJoin,
+            )
+            p.setPen(core_pen)
+            p.drawPath(path)
+
+        p.restore()
+
+    def _paint_bottom_bar(self, p: QPainter, cx: float):
+        vis = 1.0 if self._wf_idle_dots else self._vis_alpha
+        if vis <= 0.01:
+            return
+        usable_w = min(self.width() - 24, self._wf_max_width)
+        step = 15.0
+        count = max(6, min(28, int(usable_w // step)))
+        start_x = cx - ((count - 1) * step) / 2.0
+        base_y = self.height() - 26.0
+        max_h = 30.0
+        bars = self._effective_bars(count)
+
+        for i, amp in enumerate(bars):
+            x = start_x + i * step
+            blend = i / max(1, count - 1)
+            r, g, b = self._bar_color(blend)
+            h = amp * max_h
+            idle_dim = 0.62 + 0.38 * self._vis_alpha if self._wf_idle_dots else vis
+            p.setPen(QPen(QColor(r, g, b, int((28 + amp * 65) * idle_dim)), 10.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawLine(QPointF(x, base_y - h), QPointF(x, base_y + h * 0.35))
+            p.setPen(QPen(QColor(r, g, b, int(225 * idle_dim)), 6.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawLine(QPointF(x, base_y - h), QPointF(x, base_y + h * 0.35))
+
+    def _paint_dots_ring(self, p: QPainter, cx: float, cy: float):
+        vis = 1.0 if self._wf_idle_dots else self._vis_alpha
+        if vis <= 0.01:
+            return
+        inner_r = 77.0
+        bars = self._effective_bars(self._bar_count)
+        for i, amp in enumerate(bars):
+            theta = (2.0 * math.pi * i) / self._bar_count - (math.pi / 2.0)
             blend = 0.5 + 0.5 * math.sin(theta + self._phase * 0.35)
-            r = int(59 + (139 - 59) * blend)
-            g = int(130 + (92 - 130) * blend)
-            b = 246
-
-            # Soft outer glow
-            glow = QColor(r, g, b, int(45 + amp * 55))
-            p.setPen(QPen(glow, 11.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-            p.drawLine(QPointF(x1, y1), QPointF(x2, y2))
-
-            # Crisp thick core pill
-            core = QColor(r, g, b, int(165 + min(90, amp * 110)))
-            p.setPen(QPen(core, 7.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-            p.drawLine(QPointF(x1, y1), QPointF(x2, y2))
-
-        p.end()
+            r, g, b = self._bar_color(blend)
+            dist = inner_r + amp * 22.0
+            rad = 3.4 + amp * 4.0
+            x = cx + math.cos(theta) * dist
+            y = cy + math.sin(theta) * dist
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(QColor(r, g, b, int((130 + amp * 125) * vis))))
+            p.drawEllipse(QPointF(x, y), rad, rad)
 
 
 class NoWheelComboBox(QComboBox):
@@ -636,7 +1610,7 @@ class CheckableComboBox(NoWheelComboBox):
         checked = self.checked_items()
         total = self.model().rowCount()
         if total == 0:
-            text = "No audio outputs found — click Refresh"
+            text = "No audio outputs found (click Refresh)"
         elif not checked:
             text = "None selected (no audio will be captured)"
         elif len(checked) == total:
@@ -729,6 +1703,51 @@ class HotkeyRecorderEdit(QLineEdit):
             self.hotkey_recorded.emit(combo)
 
 
+def _popup_theme_tokens(dark: bool, theme_cfg: dict | None = None) -> dict:
+    """Derives cohesive background, border, text, button, and accent tokens for bottom-right notifications."""
+    cfg = theme_cfg or {}
+    t_id = cfg.get("id", "")
+    bg_cfg = cfg.get("background", {})
+    cols = cfg.get("colors", {})
+
+    accent = cols.get("accent") or ("#3B82F6" if dark else "#2563EB")
+    fg = cols.get("text") or ("#F4F4F5" if dark else "#111827")
+    sub_fg = cols.get("muted") or ("#9CA3AF" if dark else "#526075")
+    border = cols.get("card_border") or ("#2F3344" if dark else "#CBD4E1")
+
+    use_grad = (
+        t_id in ("miku", "teto")
+        or t_id.startswith("custom:")
+        or bg_cfg.get("type") == "gradient"
+    )
+    if use_grad and bg_cfg.get("color1"):
+        qc1 = QColor(bg_cfg.get("color1", "#171921"))
+        qc2 = QColor(bg_cfg.get("color2", bg_cfg.get("color1", "#171921")))
+        bg_css = (
+            f"qlineargradient(x1:0, y1:0, x2:1, y2:1, "
+            f"stop:0 rgba({qc1.red()}, {qc1.green()}, {qc1.blue()}, 244), "
+            f"stop:1 rgba({qc2.red()}, {qc2.green()}, {qc2.blue()}, 244))"
+        )
+        btn_bg = "rgba(255, 255, 255, 0.10)" if dark else "rgba(15, 23, 42, 0.08)"
+        btn_hover = "rgba(255, 255, 255, 0.18)" if dark else "rgba(15, 23, 42, 0.14)"
+    else:
+        bg_css = "rgba(23, 25, 33, 244)" if dark else "rgba(255, 255, 255, 248)"
+        btn_bg = "#252834" if dark else "#EDF1F7"
+        btn_hover = "#2E3242" if dark else "#E2E8F0"
+
+    return {
+        "bg": bg_css,
+        "border": border,
+        "fg": fg,
+        "sub_fg": sub_fg,
+        "accent": accent,
+        "btn_bg": btn_bg,
+        "btn_hover": btn_hover,
+        "btn_fg": fg,
+        "btn_border": border,
+    }
+
+
 class SubtleStatusHUD(QWidget):
     def __init__(self):
         super().__init__(
@@ -740,6 +1759,9 @@ class SubtleStatusHUD(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self._dark = True
+        self._theme_cfg = None
+        self._last_dot_color = None
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -763,15 +1785,26 @@ class SubtleStatusHUD(QWidget):
         self.hide_timer.setSingleShot(True)
         self.hide_timer.timeout.connect(self.hide)
 
-    def show_message(self, text, dark=True, dot_color="#3B82F6", auto_hide_ms=0):
-        bg = "rgba(22, 24, 30, 238)" if dark else "rgba(255, 255, 255, 246)"
-        fg = "#F4F4F5" if dark else "#111827"
-        border = "#2E3240" if dark else "#CBD4E1"
+    def _apply_style(self, dot_color=None):
+        tok = _popup_theme_tokens(self._dark, self._theme_cfg)
+        eff_dot = tok["accent"] if (not dot_color or dot_color == "#3B82F6") else dot_color
         self.pill.setStyleSheet(
-            f"QFrame#HudPill {{ background-color: {bg}; border: 1px solid {border}; border-radius: 16px; }}"
+            f"QFrame#HudPill {{ background: {tok['bg']}; border: 1px solid {tok['border']}; border-radius: 16px; }}"
         )
-        self.dot.setStyleSheet(f"color: {dot_color}; font-size: 11px;")
-        self.label.setStyleSheet(f"color: {fg}; font-size: 12px; font-weight: 600;")
+        self.dot.setStyleSheet(f"color: {eff_dot}; font-size: 11px; background: transparent;")
+        self.label.setStyleSheet(f"color: {tok['fg']}; font-size: 12px; font-weight: 600; background: transparent;")
+
+    def set_theme(self, dark: bool, theme_cfg: dict | None = None):
+        self._dark = bool(dark)
+        self._theme_cfg = theme_cfg
+        self._apply_style(self._last_dot_color)
+
+    def show_message(self, text, dark=True, dot_color="#3B82F6", auto_hide_ms=0, theme_cfg=None):
+        self._dark = bool(dark)
+        if theme_cfg is not None:
+            self._theme_cfg = theme_cfg
+        self._last_dot_color = dot_color
+        self._apply_style(dot_color)
         self.label.setText(text)
         self.adjustSize()
 
@@ -790,7 +1823,9 @@ class SubtleStatusHUD(QWidget):
 
 
 class SongResultPopup(QWidget):
-    """Bottom-right song notification that bypasses DND and stays visible for 12 seconds."""
+    """Bottom-right song notification that bypasses DND; clicking opens song details and closes it."""
+
+    clicked = pyqtSignal(dict)
 
     def __init__(self):
         super().__init__(
@@ -803,14 +1838,18 @@ class SongResultPopup(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setFixedWidth(360)
+        self._song = None
         self._open_url = ""
         self._copy_text = ""
+        self._dark = True
+        self._theme_cfg = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
 
         self.card = QFrame()
         self.card.setObjectName("PopupCard")
+        self.card.setCursor(Qt.CursorShape.PointingHandCursor)
         lay = QHBoxLayout(self.card)
         lay.setContentsMargins(12, 12, 12, 12)
         lay.setSpacing(12)
@@ -826,24 +1865,23 @@ class SongResultPopup(QWidget):
         head_row.setSpacing(6)
         self.kicker = QLabel("SONG FOUND")
         self.kicker.setStyleSheet("font-size: 10px; font-weight: 700; color: #3B82F6;")
-        close_btn = QPushButton("✕")
-        close_btn.setFixedSize(20, 20)
-        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        close_btn.setStyleSheet(
-            "QPushButton { background: transparent; border: none; color: #9CA3AF; font-size: 12px; }"
-            "QPushButton:hover { color: #F87171; }"
-        )
-        close_btn.clicked.connect(self.hide)
+        self.close_btn = QPushButton("✕")
+        self.close_btn.setFixedSize(20, 20)
+        self.close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.close_btn.clicked.connect(self.hide)
         head_row.addWidget(self.kicker)
         head_row.addStretch()
-        head_row.addWidget(close_btn)
+        head_row.addWidget(self.close_btn)
 
         self.title_lbl = ElidedLabel("")
         self.sub_lbl = ElidedLabel("")
 
+        for _w in (self.cover_lbl, self.kicker, self.title_lbl, self.sub_lbl):
+            _w.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
         btn_row = QHBoxLayout()
         btn_row.setSpacing(6)
-        self.open_btn = QPushButton("Open in Browser")
+        self.open_btn = QPushButton("Open")
         self.open_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.open_btn.clicked.connect(self._on_open)
 
@@ -867,6 +1905,43 @@ class SongResultPopup(QWidget):
         self.hide_timer.setSingleShot(True)
         self.hide_timer.timeout.connect(self.hide)
 
+    def _apply_style(self):
+        tok = _popup_theme_tokens(self._dark, self._theme_cfg)
+        self.card.setStyleSheet(
+            f"QFrame#PopupCard {{ background: {tok['bg']}; border: 1px solid {tok['border']}; border-radius: 14px; }}"
+            f"QFrame#PopupCard:hover {{ border-color: {tok['accent']}; }}"
+        )
+        self.kicker.setStyleSheet(
+            f"font-size: 10px; font-weight: 700; color: {tok['accent']}; background: transparent;"
+        )
+        self.close_btn.setStyleSheet(
+            f"QPushButton {{ background: transparent; border: none; color: {tok['sub_fg']}; font-size: 12px; }}"
+            f"QPushButton:hover {{ color: {tok['accent']}; }}"
+        )
+        self.title_lbl.setStyleSheet(f"color: {tok['fg']}; font-size: 14px; font-weight: 700; background: transparent;")
+        self.sub_lbl.setStyleSheet(f"color: {tok['sub_fg']}; font-size: 12px; background: transparent;")
+        btn_qss = (
+            f"QPushButton {{ background: {tok['btn_bg']}; color: {tok['btn_fg']}; border: 1px solid {tok['btn_border']}; "
+            f"border-radius: 6px; padding: 4px 10px; font-size: 11px; font-weight: 600; }}"
+            f"QPushButton:hover {{ background: {tok['btn_hover']}; border-color: {tok['accent']}; }}"
+        )
+        self.open_btn.setStyleSheet(btn_qss)
+        self.copy_btn.setStyleSheet(btn_qss)
+
+    def set_theme(self, dark: bool, theme_cfg: dict | None = None):
+        self._dark = bool(dark)
+        self._theme_cfg = theme_cfg
+        self._apply_style()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self._song is not None:
+            song = self._song
+            self.hide_timer.stop()
+            self.hide()
+            self.clicked.emit(song)
+            return
+        super().mousePressEvent(event)
+
     def enterEvent(self, event):
         self.hide_timer.stop()
         super().enterEvent(event)
@@ -878,6 +1953,7 @@ class SongResultPopup(QWidget):
     def _on_open(self):
         if self._open_url:
             webbrowser.open(self._open_url)
+        self.hide_timer.stop()
         self.hide()
 
     def _on_copy(self):
@@ -886,27 +1962,12 @@ class SongResultPopup(QWidget):
             self.copy_btn.setText("Copied!")
             QTimer.singleShot(1200, lambda: self.copy_btn.setText("Copy"))
 
-    def show_song(self, song: dict, dark=True):
-        bg = "#171921" if dark else "#FFFFFF"
-        border = "#2F3344" if dark else "#CBD4E1"
-        fg = "#F4F4F5" if dark else "#111827"
-        sub_fg = "#9CA3AF" if dark else "#526075"
-        btn_bg = "#252834" if dark else "#EDF1F7"
-        btn_fg = "#E4E4E7" if dark else "#1E293B"
-        btn_b = "#363A4C" if dark else "#CBD4E1"
-
-        self.card.setStyleSheet(
-            f"QFrame#PopupCard {{ background-color: {bg}; border: 1px solid {border}; border-radius: 14px; }}"
-        )
-        self.title_lbl.setStyleSheet(f"color: {fg}; font-size: 14px; font-weight: 700;")
-        self.sub_lbl.setStyleSheet(f"color: {sub_fg}; font-size: 12px;")
-        btn_qss = (
-            f"QPushButton {{ background: {btn_bg}; color: {btn_fg}; border: 1px solid {btn_b}; "
-            f"border-radius: 6px; padding: 4px 10px; font-size: 11px; font-weight: 600; }}"
-            f"QPushButton:hover {{ border-color: #3B82F6; }}"
-        )
-        self.open_btn.setStyleSheet(btn_qss)
-        self.copy_btn.setStyleSheet(btn_qss)
+    def show_song(self, song: dict, dark=True, theme_cfg=None):
+        self._song = song
+        self._dark = bool(dark)
+        if theme_cfg is not None:
+            self._theme_cfg = theme_cfg
+        self._apply_style()
         self.copy_btn.setText("Copy")
 
         self.cover_lbl.setPixmap(rounded_pixmap(song.get("cover_path", ""), 62, 9))
@@ -931,4 +1992,4 @@ class SongResultPopup(QWidget):
         self.hide_timer.stop()
         self.show()
         set_window_always_on_top(int(self.winId()), True)
-        self.hide_timer.start(12000)  # 12 seconds (~5s longer than previous 7s)
+        self.hide_timer.start(12000)

@@ -1,0 +1,8 @@
+# Optional Local AI Tricky-Track Rescue dependencies
+# NVIDIA GPU (CUDA):
+audio-separator[gpu]
+onnxruntime-gpu[cuda,cudnn]
+faster-whisper
+
+# For CPU-only machines, install instead:
+#   pip install audio-separator[cpu] faster-whisper

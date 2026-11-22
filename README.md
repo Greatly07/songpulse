@@ -1,50 +1,56 @@
 # SongPulse
 
-A lightweight Windows desktop music identifier that listens directly to your PC's system audio, even while wearing headphones or using multiple audio outputs, and has an optional local AI voice & game SFX removal.
+A lightweight Windows desktop music identifier that listens directly to your PC's system audio, even while wearing headphones or using multiple audio outputs, with optional local AI rescue for tricky tracks.
 
 <img width="720" alt="Identify Tab" src="https://github.com/user-attachments/assets/bf915661-93ea-4d7c-b8ae-2ecf3c65d5ac" />
 
 ---
 
-## Features
+## Features (v1.1.0)
 
-- **Multi-Output Desktop Audio Capture:** Listens directly to one or more Windows playback devices simultaneously via WASAPI loopback (e.g., direct headphones/audio interface + FxSound) without needing a microphone or virtual audio cables.
+- **Multi-Output Desktop Audio Capture:** Listens directly to one or more Windows playback devices simultaneously via WASAPI loopback without needing a microphone or virtual audio cables. Includes an option to disable the rolling RAM buffer when you only want Listen Live.
 - **Two Listening Modes:**
-  - **Listen (Live):** Continuously monitors playing audio and stops automatically as soon as a match is found (up to your configured max listen limit), with a **Cancel** button.
-  - **Identify Last (Rolling Buffer):** Keeps the last 5–30 seconds of desktop audio in RAM so you can identify a track you _just_ heard immediately.
-- **Optional Local AI Voice & SFX Removal:** Strips spoken dialogue, Discord chat, or game sound effects before scanning using a local UVR MDX-Net model (`UVR-MDX-NET-Inst_HQ_3.onnx`), with vocal-stem and raw-audio fallbacks.
-- **Smart GPU Load Guard:** Runs AI separation on your NVIDIA GPU (CUDA) when idle and automatically switches to CPU if GPU utilization exceeds your configured threshold (default `65%`) to avoid frame drops while gaming. Includes a built-in GPU/CPU speed test.
-- **Modern Fluent UI & System Tray Integration:**
-  - Live audio-reactive radial equalizer around the **Listen** button.
-  - Collapsible sidebar, **Always on Top** pin toggle, and automatic Windows Light/Dark theme matching (with manual overrides).
-  - Global keyboard shortcut (`Ctrl+Alt+S` by default) that works over fullscreen games and apps.
-  - Non-intrusive bottom-right status pill and optional ping chime.
-  - Minimize to system tray and optional Windows auto-startup.
-- **Searchable Library & Dynamic Song Details:**
-  - Saves identified songs locally with portable album cover caching.
+  - **Listen (Live):** Continuously monitors playing audio with non-blocking probes and instant cancellation. Also supports your selected local AI rescue model when enabled.
+  - **Identify Last (Rolling Buffer):** Keeps the last 5 to 30 seconds of desktop audio in RAM so you can identify a track you just heard immediately.
+- **Optional Tricky-Track Local AI Rescue (Saves Space):**
+  - Core SongPulse installs with **no AI engine or models downloaded by default**.
+  - Choose from curated tricky-track rescue models in **Settings -> AI Models** (or during Setup): **De-Reverb HQ**, **UVR De-Echo & De-Reverb**, **UVR DeNoise (SFX & Static)**, **UVR Crowd Remover**, **Whisper Lyrics Rescue (Tiny / Base)** for sped-up, slowed+reverb, and covers, **UVR Inst HQ 3**, or import your own custom `.onnx` / `.pth` / `.ckpt` model.
+  - Built-in speed/pitch rescue sweep for sped-up and slowed tracks, plus smart GPU load guard with automatic CPU fallback.
+- **Reworked Library & Playlists:**
+  - Switch between **Identified Songs**, **Liked Songs**, and unlimited **Custom Playlists**.
+  - Reorder custom playlists manually via drag-and-drop or move arrows, or sort by Date, Title, Artist, Genre, or Album.
+  - Multi-select checkboxes and **Select All** with top-right **Add to Playlist**, **Batch Download (yt-dlp)**, and **Clear Selected** actions.
 
   <img width="720" alt="Library Tab" src="https://github.com/user-attachments/assets/460ec2ef-836a-48c8-a3d3-b4b2753c6786" />
 
-  - Clicking any song opens a detailed view with a background gradient extracted from the album art, clickable Artist/Album links, track metadata (album, release date, genre, label, duration, ISRC, lyrics snippet), and a built-in **30-second audio preview player**.
+- **Custom Themes, Miku & Teto Themes, and Custom Waveforms:**
+  - Built-in **Match Windows**, **Dark**, **Light**, **Miku** (blue gradient, Miku sidebar cutout, diamond hair ties, and stereo Pulse Line waveform), and **Teto** (crimson gradient, Teto sidebar cutout, top-right white bow, and stereo Horizontal Split waveform with alternating red/white right bars).
+  - Create custom themes visually in **Settings -> Create Theme** or edit JSON templates in `themes/` with solid colors, gradients, or photos for both the background and sidebar.
+  - Customize waveform shape (**Radial**, **Horizontal Split**, **Pulse Line**, **Bottom Bar**, **Dots Ring**), mirroring, idle resting dots, and max width.
+- **Rich Song Details, In-App Artist/Album Popup & Full Web Player:**
+  - Dynamic album-art gradient detail view with responsive wrapped platform buttons, separated clickable artist chips, sticky top action bar, centered in-app Artist and Album info popups (clicking the name/title inside opens on your chosen site from Settings), built-in 30s audio preview, and a lightweight **Full Player** web viewer.
 
   <img width="720" alt="Detailed View" src="https://github.com/user-attachments/assets/68917bbb-4f81-40f7-bf28-53218a732f38" />
 
-  - Quick links to Shazam, YouTube, YouTube Music, Spotify, Apple Music, SoundCloud, Deezer, Amazon Music, and Tidal, plus one-click **Copy Link** and **Download with yt-dlp** integration.
-- **Built-in GitHub Update Checker:** Checks GitHub Releases directly from **Settings → Updates**.
+  - Clicking either the themed bottom-right popup or a native Windows toast notification focuses SongPulse directly on that song's detailed view and closes the notification.
+  - Quick links to Shazam, YouTube, YouTube Music, Spotify, Apple Music, SoundCloud, Deezer, Amazon Music, and Tidal, plus one-click **Copy Link** and **Download with yt-dlp** integration (with automatic setup prompt if not installed).
+- **Storage Clean-Up & Direct Self-Updater:**
+  - Selectively free disk space in **Settings -> Storage & Clean-Up** (temp files, logs, unused or all covers, individual AI models, optional AI engine, or history).
+  - Direct in-app **Update Now** in **Settings -> Updates**, plus automatic Visual C++ x64 Runtime check during Setup for fresh PCs.
 
 ---
 
 ## What SongPulse Uses
 
-| Category                          | Tools / Libraries / APIs                                                                              | Purpose                                                                                                                                               |
-| :-------------------------------- | :---------------------------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Language & UI**                 | Python 3.11+, `PyQt6`, `PyQt6.QtMultimedia`                                                           | Native Windows Fluent-style interface, custom vector icons/waveform, and 30s audio preview playback                                                   |
-| **Audio Engine**                  | `soundcard`, `soundfile`, `numpy`                                                                     | Multi-device Windows WASAPI loopback capture, rolling RAM ring buffer, FFT spectrum visualizer, and WAV mixing                                        |
-| **Music Recognition**             | `shazamio`                                                                                            | Acoustic fingerprinting and core song metadata (title, artist, album, label, genre, cover art, lyrics)                                                |
-| **Metadata & Preview Enrichment** | iTunes Search API, YouTube Search                                                                     | Fetches 30-second audio previews, track duration, clickable artist/album pages, and direct `youtube.com/watch?v=` links                               |
-| **Local AI Separation**           | `audio-separator`, `UVR-MDX-NET-Inst_HQ_3.onnx`, `onnxruntime-gpu`, `torch`, `torchvision`, `librosa` | Local vocal/dialogue & SFX removal with CUDA GPU acceleration and automatic CPU fallback                                                              |
-| **Windows Integration**           | `keyboard`, `winotify`, `ctypes`, `winreg`, `winsound`, `nvidia-smi`                                  | Global shortcuts, Windows toast fallback, DWM dark titlebars, Always-on-Top pinning, startup registry entry, ping chime, and live GPU load monitoring |
-| **Packaging**                     | `PyInstaller`, `Inno Setup 7`                                                                         | Standalone `SongPulse.exe` bundle and per-user Windows installer                                                                                      |
+| Category                          | Tools / Libraries / APIs                                                                                          | Purpose                                                                                                                                               |
+| :-------------------------------- | :---------------------------------------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Language & UI**                 | Python 3.11+, `PyQt6`, `PyQt6.QtMultimedia`                                                                       | Native Windows Fluent-style interface, custom themes/waveforms, themed overlay notifications, and 30s audio preview playback                          |
+| **Audio Engine**                  | `soundcard`, `soundfile`, `numpy`                                                                                 | Multi-device Windows WASAPI loopback capture, optional rolling RAM ring buffer, stereo L/R FFT spectrum visualizer, and WAV mixing                    |
+| **Music Recognition**             | `shazamio`                                                                                                        | Acoustic fingerprinting and core song metadata (title, artist, album, label, genre, cover art, lyrics)                                                |
+| **Metadata & Preview Enrichment** | iTunes Search API, LRCLIB, YouTube Search                                                                         | Fetches 30-second audio previews, track duration, artist/album info, lyrics rescue search, and direct `youtube.com/watch?v=` links                    |
+| **Optional Local AI Rescue**      | `audio-separator`, `faster-whisper`, `onnxruntime-gpu`, `torch`, `torchvision`, `librosa`, `scipy`                | Optional local De-Reverb, De-Echo, DeNoise, Crowd Removal, Whisper Lyrics Rescue, and speed-shift rescue with CUDA GPU acceleration and CPU fallback  |
+| **Windows Integration**           | `keyboard`, `winotify`, `ctypes`, `winreg`, `winsound`, `nvidia-smi`                                              | Global shortcuts, clickable Windows toasts (`songpulse://`), DWM titlebars, Always-on-Top pinning, startup tray mode, and live GPU load monitoring    |
+| **Packaging**                     | `PyInstaller`, `Inno Setup 7`                                                                                     | Slim `SongPulse_Core` bundle, optional `SongPulse_AI_Pack` zip, and per-user Windows installer                                                        |
 
 ---
 
@@ -52,64 +58,30 @@ A lightweight Windows desktop music identifier that listens directly to your PC'
 
 ### Option 1: Windows Installer (Recommended)
 
-1. Download `SongPulse_Setup_v1.0.0.exe` from the [Releases](https://github.com/Greatly07/songpulse/releases/latest) page.
+1. Download `SongPulse_Setup_v1.1.0.exe` from the [Releases](https://github.com/Greatly07/songpulse/releases/latest) page.
 2. Run the installer (installs per-user to `%LOCALAPPDATA%\Programs\SongPulse`; no admin rights required).
-3. Launch **SongPulse** from your Start Menu.
+3. Choose **Compact installation** (Core only, smallest footprint) or **Custom installation** to optionally include the AI Engine and models.
+4. Launch **SongPulse** from your Start Menu.
 
-> **Note for GPU Acceleration:** AI Voice & SFX Removal works out of the box on CPU. For faster NVIDIA GPU acceleration (~1–2s), ensure you have an up-to-date NVIDIA driver and **CUDA Toolkit 13.x** installed.
+> **Note for GPU Acceleration:** Optional AI rescue models work out of the box on CPU. For faster NVIDIA GPU acceleration, ensure you have an up-to-date NVIDIA driver installed.
 
 ### Option 2: Run from Source
 
 1. **Requirements:** Windows 10/11 (64-bit) and Python 3.11+.
 2. Clone the repository:
    ```bash
-   git clone [https://github.com/Greatly07/songpulse.git](https://github.com/Greatly07/songpulse.git)
+   git clone https://github.com/Greatly07/songpulse.git
    cd songpulse
    ```
-3. Install dependencies:
+3. Install core dependencies:
    ```bash
    pip install -r requirements.txt
    ```
-   _(If you do not have an NVIDIA GPU, install `audio-separator[cpu]` instead of `audio-separator[gpu]` and `onnxruntime-gpu`.)_
-4. Launch the app:
+4. *(Optional)* Install local AI tricky-track rescue dependencies:
+   ```bash
+   pip install -r requirements-ai.txt
+   ```
+5. Launch the app:
    ```bash
    python song_id_app.pyw
    ```
-   _(Or double-click `song_id_app.pyw` to run without a console window.)_
-
----
-
-## Building the Windows Installer
-
-1. Install [Inno Setup 6](https://jrsoftware.org/isdl.php) and PyInstaller (`pip install pyinstaller`).
-2. Run `build_release.bat` from the project root.
-3. The script automatically generates `songpulse.ico`, bundles `dist\SongPulse\SongPulse.exe` via PyInstaller, and compiles the installer to `release\SongPulse_Setup_v1.0.0.exe`.
-
----
-
-## Project Structure
-
-```text
-SongID/
-├── song_id_app.pyw          # Entry point & single-instance guard
-├── songpulse/
-│   ├── __init__.py
-│   ├── config.py            # Paths, CUDA setup, settings/history I/O, Windows & GPU helpers
-│   ├── audio.py             # Multi-output WASAPI rolling buffer & live FFT spectrum
-│   ├── workers.py           # Shazam matching, UVR model manager, benchmark & GitHub updater
-│   ├── theme.py             # Dark/Light QSS themes, vector icons & album-cover color extraction
-│   ├── widgets.py           # Waveform button, responsive link bars, hover cards & popups
-│   ├── detail_view.py       # Dynamic-gradient Song Details view, audio player & yt-dlp handoff
-│   └── main_window.py       # Main window, animated sidebar, tray icon & live Settings
-├── build_release.bat        # One-click PyInstaller + Inno Setup build script
-├── SongPulse_Setup.iss      # Inno Setup per-user installer script
-├── requirements.txt
-└── README.md
-```
-
----
-
-## Data Storage
-
-- **Installed `.exe`:** Saves settings, song library (`history.json`), cached album covers, and the downloaded UVR model in `%LOCALAPPDATA%\SongPulse` so updates never erase your data.
-- **Running from source (`.pyw`):** Saves all runtime data in a local `data/` folder inside the project directory.

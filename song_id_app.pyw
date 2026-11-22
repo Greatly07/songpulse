@@ -9,13 +9,15 @@ if sys.stderr is None:
 
 import ctypes
 
-# Import config first so CUDA 13.x DLL paths & onnxruntime preloading run before PyQt6/workers
 from songpulse.config import (
     APP_DIR,
     APP_NAME,
     APP_USER_MODEL_ID,
     ICON_CACHE_FILE,
     SINGLE_INSTANCE_KEY,
+    is_windows_dark_mode,
+    load_settings,
+    register_uri_protocol,
     set_window_always_on_top,
     set_windows_titlebar_theme,
 )
@@ -23,8 +25,16 @@ from songpulse.config import (
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import QApplication
 
-from songpulse.main_window import SongPulseWindow
 from songpulse.theme import create_app_icon, export_multi_res_ico
+from songpulse.widgets import LoadingSplash
+
+
+def _extract_song_id_arg(argv: list[str]) -> str:
+    for arg in argv[1:]:
+        low = arg.lower()
+        if low.startswith("songpulse://song/"):
+            return arg.split("songpulse://song/", 1)[1].strip("/ ")
+    return ""
 
 
 def main():
@@ -43,6 +53,35 @@ def main():
         print(f"Icon saved to: {out_ico}")
         sys.exit(0)
 
+    register_uri_protocol()
+
+    open_song_id = _extract_song_id_arg(sys.argv)
+    ipc_payload = f"OPEN_SONG:{open_song_id}".encode("utf-8") if open_song_id else b"SHOW"
+
+    # Single-instance guard
+    sock = QLocalSocket()
+    sock.connectToServer(SINGLE_INSTANCE_KEY)
+    if sock.waitForConnected(250):
+        sock.write(ipc_payload)
+        sock.flush()
+        sock.waitForBytesWritten(250)
+        sock.disconnectFromServer()
+        sys.exit(0)
+
+    saved_cfg = load_settings()
+    start_tray = ("--tray" in sys.argv) or (
+        bool(saved_cfg.get("start_minimized_to_tray", False)) and not open_song_id
+    )
+
+    # Show sleek startup loading card while SongPulse initializes
+    splash = None
+    if not start_tray:
+        theme_pref = saved_cfg.get("theme", "auto")
+        splash_dark = is_windows_dark_mode() if theme_pref == "auto" else (theme_pref != "light")
+        splash = LoadingSplash(dark=splash_dark)
+        splash.show()
+        app.processEvents()
+
     if not os.path.exists(ICON_CACHE_FILE):
         try:
             export_multi_res_ico(ICON_CACHE_FILE)
@@ -52,33 +91,35 @@ def main():
     app_icon = create_app_icon()
     app.setWindowIcon(app_icon)
 
-    # Single-instance guard
-    sock = QLocalSocket()
-    sock.connectToServer(SINGLE_INSTANCE_KEY)
-    if sock.waitForConnected(250):
-        sock.write(b"SHOW")
-        sock.flush()
-        sock.waitForBytesWritten(250)
-        sock.disconnectFromServer()
-        sys.exit(0)
-
     QLocalServer.removeServer(SINGLE_INSTANCE_KEY)
     server = QLocalServer()
     server.listen(SINGLE_INSTANCE_KEY)
+
+    from songpulse.main_window import SongPulseWindow
 
     window = SongPulseWindow(app_icon)
 
     def on_new_connection():
         client = server.nextPendingConnection()
         if client and client.waitForReadyRead(250):
-            if client.readAll().data() == b"SHOW":
+            msg = client.readAll().data().decode("utf-8", errors="ignore").strip()
+            if msg.startswith("OPEN_SONG:"):
+                sid = msg.split("OPEN_SONG:", 1)[1].strip()
+                window.open_song_by_id(sid)
+            elif msg == "SHOW":
                 window.show_and_focus()
         if client:
             client.disconnectFromServer()
 
     server.newConnection.connect(on_new_connection)
 
-    if "--tray" not in sys.argv:
+    if splash is not None:
+        splash.close()
+        splash.deleteLater()
+
+    if open_song_id:
+        window.open_song_by_id(open_song_id)
+    elif not start_tray:
         window.show()
         set_windows_titlebar_theme(int(window.winId()), bool(window.last_dark_state))
         if window.is_pinned:

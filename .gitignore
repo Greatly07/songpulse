@@ -5,5 +5,7 @@ dist/
 release/
 data/
 *.spec
+!SongPulse.spec
+!SongPulse_Core.spec
 *.wav
 *.onnx

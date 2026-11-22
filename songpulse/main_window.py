@@ -1,7 +1,10 @@
-import os
-import threading
-import webbrowser
 import copy
+import hashlib
+import os
+import shutil
+import threading
+import time
+import webbrowser
 
 import keyboard
 from winotify import Notification
@@ -17,48 +20,71 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import QAction, QIcon
 from PyQt6.QtWidgets import (
     QApplication,
+    QButtonGroup,
     QCheckBox,
-    QComboBox,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
     QMenu,
     QMessageBox,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QSizePolicy,
-    QSpinBox,
-    QFileDialog,
     QStackedWidget,
     QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
 )
-from .detail_view import SongDetailPage
 
-from .audio import AudioBufferEngine
+from .audio import WAVEFORM_BARS, AudioBufferEngine
 from .config import (
+    AI_MODEL_CATALOG,
+    AI_MODEL_EXTENSIONS,
     APP_NAME,
     APP_VERSION,
     DEFAULT_SETTINGS,
     GITHUB_REPO,
     ICON_CACHE_FILE,
-    find_default_ytdlp_app,
+    MODELS_DIR,
+    PREFERRED_INFO_SITES,
+    THEMES_DIR,
+    UVR_MODEL_NAME,
     ensure_ping_sound,
+    find_default_ytdlp_app,
+    format_bytes,
+    get_downloaded_ai_models,
+    get_model_file_path,
     get_nvidia_gpu_info,
+    get_storage_breakdown,
+    is_ai_engine_installed,
+    is_model_downloaded,
+    is_model_ready,
     is_startup_enabled,
+    is_whisper_model_id,
     is_windows_dark_mode,
     list_speakers_safe,
     load_history,
+    load_playlists,
     load_settings,
     play_ping_sound,
     save_history,
+    save_playlists,
     save_settings,
     set_startup_enabled,
     set_window_always_on_top,
     set_windows_titlebar_theme,
+)
+from .detail_view import SongDetailPage, _force_focus_window, _launch_and_autopaste_ytdlp
+from .dialogs import (
+    CustomThemeDialog,
+    DownloadProgressDialog,
+    StorageCleanupDialog,
+    prompt_install_or_locate_ytdlp,
 )
 from .theme import (
     build_palette,
@@ -68,10 +94,17 @@ from .theme import (
     ensure_chevron_icons,
     rounded_pixmap,
 )
+from .themes_manager import (
+    ensure_theme_template_and_assets,
+    list_all_theme_choices,
+    load_theme_config,
+)
 from .widgets import (
     CheckableComboBox,
     ClickableCard,
     FlowLayout,
+    FlowWidget,
+    GlassSidebarFrame,
     HelpBadge,
     HistoryRowCard,
     HotkeyRecorderEdit,
@@ -81,15 +114,20 @@ from .widgets import (
     ResponsiveLinksBar,
     SongResultPopup,
     SubtleStatusHUD,
+    ThemedBackgroundWidget,
     get_song_link,
 )
 from .workers import (
+    AiRuntimeDownloadWorker,
+    AppUpdateWorker,
     BenchmarkWorker,
     IdentifyWorker,
+    ModelDownloadWorker,
     ModelLoaderThread,
     ModelManager,
     UpdateCheckWorker,
     build_song_platform_links,
+    resolve_youtube_watch_url,
 )
 
 
@@ -126,6 +164,7 @@ class SongPulseWindow(QMainWindow):
         self.app_icon = app_icon
         self.chevrons = ensure_chevron_icons()
         ensure_ping_sound()
+        ensure_theme_template_and_assets()
 
         self.settings = load_settings()
         self._saved_settings_snapshot = copy.deepcopy(self.settings)
@@ -136,15 +175,26 @@ class SongPulseWindow(QMainWindow):
         self._audio_reconfig_timer.timeout.connect(self._apply_audio_reconfig_now)
 
         self.history = load_history()
-        self.model_mgr = ModelManager()
+        self.playlists = load_playlists()
+        self.active_playlist_key = "all"  # "all", "liked", or playlist_id
+        self.selected_song_ids = set()
+        self._lib_cards = []
+        self._ai_section_expanded = False
+
+        self.model_mgr = ModelManager(
+            initial_model=self.settings.get("ai_model", UVR_MODEL_NAME)
+        )
         self.worker = None
         self.cancel_evt = threading.Event()
         self.bench_worker = None
         self.update_worker = None
+        self.model_loader = None
         self.is_processing = False
         self.has_unsaved_settings = False
         self.tray_hint_shown = False
         self.last_dark_state = None
+        self._last_theme_sig = None
+        self._current_theme_cfg = None
         self.registered_hotkey = None
 
         self.sidebar_collapsed = False
@@ -156,11 +206,11 @@ class SongPulseWindow(QMainWindow):
         self.setMinimumSize(540, 480)
         if self.settings.get("save_window_size", True):
             self.resize(
-                int(self.settings.get("window_width", 900)),
-                int(self.settings.get("window_height", 650)),
+                int(self.settings.get("window_width", 920)),
+                int(self.settings.get("window_height", 660)),
             )
         else:
-            self.resize(900, 650)
+            self.resize(920, 660)
 
         self.p_icons = {
             k: create_platform_icon(k, 14)
@@ -181,15 +231,16 @@ class SongPulseWindow(QMainWindow):
 
         self.hud = SubtleStatusHUD()
         self.song_popup = SongResultPopup()
+        self.song_popup.clicked.connect(self._on_notification_clicked)
 
         self.engine = AudioBufferEngine(
             target_devices=self.settings.get("target_devices", []),
             monitor_all=self.settings.get("monitor_all_devices", True),
             buffer_seconds=self.settings.get("buffer_seconds", 12),
+            enable_buffer=self.settings.get("enable_audio_buffer", True),
         )
         self.engine.start()
 
-        # Smooth sidebar width animator
         self.sidebar_anim = QVariantAnimation(self)
         self.sidebar_anim.setDuration(200)
         self.sidebar_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
@@ -198,7 +249,7 @@ class SongPulseWindow(QMainWindow):
 
         self._build_ui()
         self._build_tray()
-        self.apply_theme()
+        self.apply_theme(force=True)
         self._apply_sidebar_state(self.width() < 760, animate=False)
         self._update_pin_button_ui()
 
@@ -207,30 +258,29 @@ class SongPulseWindow(QMainWindow):
 
         self.wave_timer = QTimer(self)
         self.wave_timer.timeout.connect(self._tick_waveform)
-        self.wave_timer.start(30)
+        self.wave_timer.start(20)
 
         self.periodic_timer = QTimer(self)
         self.periodic_timer.timeout.connect(self._on_periodic_tick)
         self.periodic_timer.start(2500)
 
-        self.model_loader = ModelLoaderThread(self.model_mgr)
-        self.model_loader.loaded.connect(self._on_model_loaded)
-        self.model_loader.failed.connect(self._on_model_failed)
-        self.model_loader.start()
+        self._refresh_ai_footer_status()
+        if self.settings.get("use_ai_separation", False) and is_model_ready(
+            self.settings.get("ai_model", UVR_MODEL_NAME)
+        ):
+            self._start_model_preload(self.settings.get("ai_model", UVR_MODEL_NAME))
 
     # --- UI CONSTRUCTION ---
     def _build_ui(self):
-        root = QWidget()
-        root.setObjectName("Root")
-        self.setCentralWidget(root)
+        self.root_widget = ThemedBackgroundWidget()
+        self.setCentralWidget(self.root_widget)
 
-        main_layout = QHBoxLayout(root)
+        main_layout = QHBoxLayout(self.root_widget)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # Collapsible Sidebar (Gemini-style top bar: Brand left, Pin + Sidebar Toggle right)
-        self.sidebar = QFrame()
-        self.sidebar.setObjectName("Sidebar")
+        # Collapsible Frosted-Glass Sidebar
+        self.sidebar = GlassSidebarFrame()
         self.sidebar.setFixedWidth(self.SIDEBAR_EXPANDED_W)
         side_layout = QVBoxLayout(self.sidebar)
         side_layout.setContentsMargins(10, 14, 10, 14)
@@ -270,7 +320,6 @@ class SongPulseWindow(QMainWindow):
         side_layout.addLayout(header_row)
         side_layout.addSpacing(4)
 
-        # Nav Tab Buttons with Icons
         self.nav_defs = [
             ("Identify", "identify"),
             ("Library", "library"),
@@ -289,19 +338,18 @@ class SongPulseWindow(QMainWindow):
 
         side_layout.addStretch()
 
-        # Footer AI Status
         self.ai_foot_widget = QWidget()
         ai_foot = QHBoxLayout(self.ai_foot_widget)
         ai_foot.setContentsMargins(4, 0, 2, 0)
         ai_foot.setSpacing(6)
         self.model_dot = QLabel("●")
-        self.model_dot.setStyleSheet("color: #F59E0B; font-size: 10px;")
-        self.model_status_lbl = QLabel("Loading AI...")
+        self.model_dot.setStyleSheet("color: #71717A; font-size: 10px;")
+        self.model_status_lbl = QLabel("AI: Optional")
         self.model_status_lbl.setObjectName("Muted")
         self.model_status_lbl.setStyleSheet("font-size: 11px;")
         self.model_status_lbl.setWordWrap(True)
         self.model_help = HelpBadge(
-            "Local AI model used only when 'Remove Voice & SFX' is turned on."
+            "Optional local AI rescue for reverb, noise, crowd, or lyrics matching."
         )
         ai_foot.addWidget(self.model_dot)
         ai_foot.addWidget(self.model_status_lbl, 1)
@@ -310,11 +358,10 @@ class SongPulseWindow(QMainWindow):
 
         main_layout.addWidget(self.sidebar)
 
-        # Stacked Pages
         self.pages = QStackedWidget()
         self.pages.addWidget(self._build_identify_page())
         self.pages.addWidget(self._build_library_page())
-        self.pages.addWidget(self._build_settings_page())   
+        self.pages.addWidget(self._build_settings_page())
         self.detail_page = SongDetailPage(
             self.p_icons,
             get_settings_fn=lambda: self.settings,
@@ -322,7 +369,8 @@ class SongPulseWindow(QMainWindow):
         self.detail_page.back_requested.connect(lambda: self.switch_page(1))
         self.detail_page.song_updated.connect(self._on_song_enriched)
         self.detail_page.ytdlp_path_changed.connect(self._on_ytdlp_path_picked)
-        self.pages.addWidget(self.detail_page)  # Hidden index 3 (inside Library)
+        self.detail_page.like_toggled.connect(self._toggle_song_liked)
+        self.pages.addWidget(self.detail_page)
         main_layout.addWidget(self.pages, 1)
 
         self._set_active_nav(0)
@@ -332,7 +380,8 @@ class SongPulseWindow(QMainWindow):
         idle_col = "#A1A1AA" if dark else "#475569"
         active_col = "#FFFFFF"
         ctrl_col = "#D4D4D8" if dark else "#334155"
-        pin_col = "#3B82F6" if self.is_pinned else ctrl_col
+        accent = (self._current_theme_cfg or {}).get("colors", {}).get("accent", "#3B82F6")
+        pin_col = accent if self.is_pinned else ctrl_col
 
         self.collapse_btn.setIcon(create_ui_icon("sidebar", ctrl_col, 16))
         self.pin_btn.setIcon(create_ui_icon("pin", pin_col, 15))
@@ -391,6 +440,7 @@ class SongPulseWindow(QMainWindow):
     def _toggle_always_on_top(self):
         self.is_pinned = not self.is_pinned
         self.settings["always_on_top"] = self.is_pinned
+        self._saved_settings_snapshot["always_on_top"] = self.is_pinned
         save_settings(self.settings)
         set_window_always_on_top(int(self.winId()), self.is_pinned)
         self._update_pin_button_ui()
@@ -414,7 +464,6 @@ class SongPulseWindow(QMainWindow):
         elif not self.sidebar_user_collapsed and self.sidebar_collapsed:
             self._apply_sidebar_state(False, animate=True)
 
-
     # --- IDENTIFY PAGE ---
     def _build_identify_page(self):
         page = QWidget()
@@ -434,7 +483,6 @@ class SongPulseWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
 
-        # Clean Header
         title_col = QVBoxLayout()
         title_col.setSpacing(2)
         h1 = QLabel("Identify Song")
@@ -447,15 +495,12 @@ class SongPulseWindow(QMainWindow):
         title_col.addWidget(self.sub_status_lbl)
         layout.addLayout(title_col)
 
-        # No-Output Error Banner
         self.no_output_banner = QFrame()
         self.no_output_banner.setObjectName("ErrorBanner")
         no_out_lay = QHBoxLayout(self.no_output_banner)
         no_out_lay.setContentsMargins(10, 7, 10, 7)
         no_out_lay.setSpacing(10)
-        no_out_lbl = QLabel(
-            "⚠ No audio output selected — SongPulse cannot hear anything right now."
-        )
+        no_out_lbl = QLabel("No audio output selected. Pick an output in Settings to listen.")
         no_out_lbl.setObjectName("ErrorText")
         no_out_lbl.setWordWrap(True)
         fix_out_btn = QPushButton("Select Output")
@@ -468,15 +513,18 @@ class SongPulseWindow(QMainWindow):
 
         layout.addStretch(1)
 
-        # Main Circular "Listen" (Live) Button + Waveform
         btn_wrap = QVBoxLayout()
         btn_wrap.setAlignment(Qt.AlignmentFlag.AlignCenter)
         btn_wrap.setSpacing(10)
 
+        pulse_row = QHBoxLayout()
+        pulse_row.setContentsMargins(0, 0, 0, 0)
+        pulse_row.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.pulse_btn = PulseIdentifyWidget()
         self.pulse_btn.setText("Listen")
         self.pulse_btn.clicked.connect(lambda: self.trigger_identify(mode="live"))
-        btn_wrap.addWidget(self.pulse_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+        pulse_row.addWidget(self.pulse_btn)
+        btn_wrap.addLayout(pulse_row)
 
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.setObjectName("DangerBtn")
@@ -485,14 +533,12 @@ class SongPulseWindow(QMainWindow):
         self.cancel_btn.hide()
         btn_wrap.addWidget(self.cancel_btn, alignment=Qt.AlignmentFlag.AlignCenter)
 
-        # AI Voice/SFX Warning sits right between "Listen" and "Identify Last"
         self.ai_warn_banner = QFrame()
         self.ai_warn_banner.setObjectName("WarnBanner")
         warn_lay = QHBoxLayout(self.ai_warn_banner)
         warn_lay.setContentsMargins(12, 6, 12, 6)
         warn_lbl = QLabel(
-            "⚠ Voice & SFX Removal is ON — specifically strips speech & sound effects. "
-            "Not recommended for normal songs."
+            "AI Rescue is ON for tricky tracks (reverb, noise, sped-up, or speech). Turn off for normal clean music."
         )
         warn_lbl.setObjectName("WarnText")
         warn_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -500,7 +546,6 @@ class SongPulseWindow(QMainWindow):
         warn_lay.addWidget(warn_lbl)
         btn_wrap.addWidget(self.ai_warn_banner)
 
-        # Identify Last Buffer Button + AI Voice/SFX Removal Checkbox
         buffer_row = QHBoxLayout()
         buffer_row.setAlignment(Qt.AlignmentFlag.AlignCenter)
         buffer_row.setSpacing(10)
@@ -510,13 +555,13 @@ class SongPulseWindow(QMainWindow):
         self.buffer_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.buffer_btn.clicked.connect(lambda: self.trigger_identify(mode="buffer"))
 
-        self.quick_ai_chk = QCheckBox("Remove Voice && SFX (AI)")
+        self.quick_ai_chk = QCheckBox("Tricky Track AI Rescue")
         self.quick_ai_chk.setChecked(bool(self.settings.get("use_ai_separation", False)))
         self.quick_ai_chk.stateChanged.connect(self._on_quick_ai_toggled)
 
         ai_help = HelpBadge(
-            "Applies to 'Identify Last' only — specifically removes spoken voices and game SFX.\n"
-            "Not recommended for normal music; turn ON only when speech or loud SFX covers the song."
+            "Runs your selected local AI model (De-Reverb, De-Noise, Crowd, or Whisper Lyrics)\n"
+            "on both Identify Last and Listen Live when normal matching misses."
         )
 
         buffer_row.addWidget(self.buffer_btn)
@@ -526,16 +571,16 @@ class SongPulseWindow(QMainWindow):
 
         self.ai_warn_banner.setVisible(self.quick_ai_chk.isChecked())
 
-        self.live_status_lbl = QLabel("Ready — click Listen or press your shortcut anytime")
+        self.live_status_lbl = QLabel("Ready. Click Listen or press your shortcut anytime.")
         self.live_status_lbl.setObjectName("Muted")
         self.live_status_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.live_status_lbl.setWordWrap(True)
         self.live_status_lbl.setStyleSheet("font-size: 12px;")
         btn_wrap.addWidget(self.live_status_lbl)
 
         layout.addLayout(btn_wrap)
         layout.addSpacing(8)
 
-        # Song Result Card (clicking anywhere on the card opens the hidden Song Details tab)
         self.current_result_song = None
         self.result_card = ClickableCard()
         self.result_card.clicked.connect(self._open_current_result_details)
@@ -605,82 +650,191 @@ class SongPulseWindow(QMainWindow):
             self.pulse_btn.clear_waveform()
 
         hk = self.settings.get("hotkey", "ctrl+alt+s").upper()
+        buf_enabled = bool(self.settings.get("enable_audio_buffer", True))
         buf_s = int(self.settings.get("buffer_seconds", 12))
-        hk_mode = "Listen Live" if self.settings.get("hotkey_mode") == "live" else f"Last {buf_s}s"
+        hk_mode = (
+            "Listen Live"
+            if (self.settings.get("hotkey_mode") == "live" or not buf_enabled)
+            else f"Last {buf_s}s"
+        )
         out_txt = (
             "No audio output selected"
             if not has_outputs
             else f"Listening to {count} audio output" + ("" if count == 1 else "s")
         )
         self.sub_status_lbl.setText(f"{out_txt} • Shortcut: {hk} ({hk_mode})")
+        self.buffer_btn.setVisible(buf_enabled)
         if not self.is_processing:
             self.pulse_btn.setText("Listen")
             self.buffer_btn.setText(f"Identify Last {buf_s}s")
 
-    # --- LIBRARY PAGE ---
+    # --- LIBRARY PAGE (FULL-WIDTH SCROLLING + PLAYLISTS + BATCH SELECT) ---
     def _build_library_page(self):
         page = QWidget()
         page.setObjectName("Page")
-        outer = QHBoxLayout(page)
-        outer.setContentsMargins(22, 20, 22, 18)
+        page_lay = QVBoxLayout(page)
+        page_lay.setContentsMargins(0, 0, 0, 0)
+
+        # Full-width scroll area so scrolling on the empty left/right sides always works!
+        scroll_inner = QWidget()
+        outer = QHBoxLayout(scroll_inner)
+        outer.setContentsMargins(22, 18, 22, 18)
 
         center_col = QWidget()
         center_col.setObjectName("Page")
         center_col.setMaximumWidth(980)
+        center_col.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout = QVBoxLayout(center_col)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(12)
+        layout.setSpacing(10)
 
+        # Top header + batch action buttons on the right
         top = QHBoxLayout()
-        h1 = QLabel("Saved Songs")
+        top.setSpacing(8)
+        h1 = QLabel("Library")
         h1.setStyleSheet("font-size: 20px; font-weight: 700;")
         self.lib_count_lbl = QLabel("")
         self.lib_count_lbl.setObjectName("Muted")
-        self.lib_count_lbl.setStyleSheet("font-size: 12px; margin-left: 6px;")
+        self.lib_count_lbl.setStyleSheet("font-size: 12px; margin-left: 4px;")
 
-        clear_btn = QPushButton("Clear All")
-        clear_btn.setObjectName("DangerBtn")
-        clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        clear_btn.clicked.connect(self.clear_history)
+        # Batch action bar (shown when 1+ songs are checked)
+        self.batch_bar = QWidget()
+        batch_lay = QHBoxLayout(self.batch_bar)
+        batch_lay.setContentsMargins(0, 0, 0, 0)
+        batch_lay.setSpacing(6)
+
+        self.batch_add_pl_btn = QPushButton("Add to Playlist ▾")
+        self.batch_add_pl_btn.setObjectName("PlatformBtn")
+        self.batch_add_pl_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.batch_add_pl_btn.clicked.connect(self._show_batch_add_playlist_menu)
+
+        self.batch_ytdlp_btn = QPushButton("Batch Download (yt-dlp)")
+        self.batch_ytdlp_btn.setObjectName("PlatformBtn")
+        self.batch_ytdlp_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.batch_ytdlp_btn.clicked.connect(self._batch_download_selected)
+
+        self.batch_clear_btn = QPushButton("Clear Selected")
+        self.batch_clear_btn.setObjectName("DangerBtn")
+        self.batch_clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.batch_clear_btn.clicked.connect(self._clear_selected_songs)
+
+        batch_lay.addWidget(self.batch_add_pl_btn)
+        batch_lay.addWidget(self.batch_ytdlp_btn)
+        batch_lay.addWidget(self.batch_clear_btn)
+        self.batch_bar.hide()
+
+        self.clear_all_btn = QPushButton("Clear All")
+        self.clear_all_btn.setObjectName("DangerBtn")
+        self.clear_all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.clear_all_btn.clicked.connect(self.clear_history)
 
         top.addWidget(h1)
         top.addWidget(self.lib_count_lbl)
         top.addStretch()
-        top.addWidget(clear_btn)
+        top.addWidget(self.batch_bar)
+        top.addWidget(self.clear_all_btn)
         layout.addLayout(top)
 
+        # Playlist tabs row (Identified Songs, Liked Songs, custom playlists, + New Playlist)
+        pl_bar = QHBoxLayout()
+        pl_bar.setSpacing(6)
+        self.playlist_tabs_flow = FlowWidget(h_spacing=6, v_spacing=6)
+        pl_bar.addWidget(self.playlist_tabs_flow, 1)
+        layout.addLayout(pl_bar)
+
+        # Search + Sort + Custom playlist actions row
+        ctrl_row = QHBoxLayout()
+        ctrl_row.setSpacing(8)
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Search by song, artist, album, or genre...")
         self.search_input.textChanged.connect(self.refresh_library)
-        layout.addWidget(self.search_input)
 
-        self.lib_container = QWidget()
-        self.lib_list_layout = QVBoxLayout(self.lib_container)
-        self.lib_list_layout.setContentsMargins(6, 6, 8, 6)
+        self.lib_sort_combo = NoWheelComboBox()
+        self.lib_sort_combo.addItems(
+            [
+                "Manual Order",
+                "Date (Newest)",
+                "Date (Oldest)",
+                "Title (A-Z)",
+                "Artist (A-Z)",
+                "Genre",
+                "Album",
+            ]
+        )
+        self.lib_sort_combo.setCurrentIndex(1)
+        self.lib_sort_combo.currentIndexChanged.connect(self._on_library_sort_changed)
+
+        self.pl_rename_btn = QPushButton("Rename")
+        self.pl_rename_btn.setObjectName("PlatformBtn")
+        self.pl_rename_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.pl_rename_btn.clicked.connect(self._rename_active_playlist)
+        self.pl_rename_btn.hide()
+
+        self.pl_del_btn = QPushButton("Delete Playlist")
+        self.pl_del_btn.setObjectName("DangerBtn")
+        self.pl_del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.pl_del_btn.clicked.connect(self._delete_active_playlist)
+        self.pl_del_btn.hide()
+
+        ctrl_row.addWidget(self.search_input, 1)
+        ctrl_row.addWidget(self.lib_sort_combo)
+        ctrl_row.addWidget(self.pl_rename_btn)
+        ctrl_row.addWidget(self.pl_del_btn)
+        layout.addLayout(ctrl_row)
+
+        # Select All row directly above songs (comfortable clickable padding)
+        sel_row = QHBoxLayout()
+        sel_row.setContentsMargins(6, 2, 4, 0)
+        sel_row.setSpacing(8)
+        self.select_all_chk = QCheckBox("Select All")
+        self.select_all_chk.setStyleSheet("QCheckBox { padding: 6px 10px; }")
+        self.select_all_chk.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.select_all_chk.stateChanged.connect(self._on_select_all_toggled)
+        self.selected_count_lbl = QLabel("")
+        self.selected_count_lbl.setObjectName("Muted")
+        self.selected_count_lbl.setStyleSheet("font-size: 11px;")
+        sel_row.addWidget(self.select_all_chk)
+        sel_row.addWidget(self.selected_count_lbl)
+        sel_row.addStretch()
+        layout.addLayout(sel_row)
+
+        # Song list container (no nested scroll; entire page scrolls smoothly including left/right sides!)
+        self.lib_list_layout = QVBoxLayout()
+        self.lib_list_layout.setContentsMargins(4, 4, 4, 8)
         self.lib_list_layout.setSpacing(8)
-        self.lib_list_layout.addStretch()
-
-        scroll = _make_clean_scroll(self.lib_container, horizontal_off=True)
-        layout.addWidget(scroll, 1)
+        layout.addLayout(self.lib_list_layout)
+        layout.addStretch(1)
 
         outer.addStretch(1)
         outer.addWidget(center_col, 10)
         outer.addStretch(1)
+
+        self.lib_scroll = _make_clean_scroll(scroll_inner, horizontal_off=True)
+        page_lay.addWidget(self.lib_scroll)
+
+        self._rebuild_playlist_tabs()
         return page
 
     # --- SETTINGS PAGE ---
     def _build_settings_page(self):
         page = QWidget()
         page.setObjectName("Page")
-        outer_h = QHBoxLayout(page)
-        outer_h.setContentsMargins(22, 18, 22, 16)
+        page_lay = QVBoxLayout(page)
+        page_lay.setContentsMargins(0, 0, 0, 0)
+        page_lay.setSpacing(0)
+
+        # Full-width scroll area so scrolling anywhere on the sides of Settings works smoothly!
+        scroll_inner = QWidget()
+        scroll_h = QHBoxLayout(scroll_inner)
+        scroll_h.setContentsMargins(22, 18, 22, 16)
 
         center_col = QWidget()
         center_col.setObjectName("Page")
         center_col.setMaximumWidth(920)
-        outer = QVBoxLayout(center_col)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(12)
+        center_col.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        layout = QVBoxLayout(center_col)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
 
         top = QHBoxLayout()
         h1 = QLabel("Settings")
@@ -690,32 +844,75 @@ class SongPulseWindow(QMainWindow):
         top.addWidget(h1)
         top.addStretch()
         top.addWidget(self.unsaved_lbl)
-        outer.addLayout(top)
+        layout.addLayout(top)
 
-        content = QWidget()
-        layout = QVBoxLayout(content)
-        layout.setContentsMargins(0, 0, 6, 0)
-        layout.setSpacing(12)
-
-        # 1. Look & Window
+        # 1. Look, Theme & Waveform
         app_card = QFrame()
         app_card.setObjectName("Card")
         app_lay = QVBoxLayout(app_card)
         app_lay.setContentsMargins(16, 14, 16, 14)
         app_lay.setSpacing(10)
 
-        sec1 = QLabel("Look & Window")
+        sec1 = QLabel("Look, Theme & Waveform")
         sec1.setStyleSheet("font-size: 14px; font-weight: 600;")
         app_lay.addWidget(sec1)
 
         theme_row = QHBoxLayout()
+        theme_row.setSpacing(8)
         theme_row.addWidget(QLabel("Theme"))
         theme_row.addStretch()
         self.theme_combo = NoWheelComboBox()
-        self.theme_combo.addItems(["Match Windows", "Dark", "Light"])
+        self.theme_combo.setMinimumWidth(190)
         self.theme_combo.currentIndexChanged.connect(self._mark_unsaved)
+        create_theme_btn = QPushButton("Create Theme")
+        create_theme_btn.setObjectName("PlatformBtn")
+        create_theme_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        create_theme_btn.clicked.connect(self._open_create_theme_dialog)
+        themes_dir_btn = QPushButton("Themes Folder")
+        themes_dir_btn.setObjectName("PlatformBtn")
+        themes_dir_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        themes_dir_btn.clicked.connect(lambda: os.startfile(THEMES_DIR))
         theme_row.addWidget(self.theme_combo)
+        theme_row.addWidget(create_theme_btn)
+        theme_row.addWidget(themes_dir_btn)
         app_lay.addLayout(theme_row)
+
+        wf_row = QHBoxLayout()
+        wf_row.setSpacing(8)
+        wf_row.addWidget(QLabel("Waveform Shape"))
+        wf_row.addStretch()
+        self.wf_style_combo = NoWheelComboBox()
+        self.wf_style_combo.addItems(
+            [
+                "Auto (Follow Theme)",
+                "Radial (Around Button)",
+                "Horizontal Split (Left & Right)",
+                "Pulse Line (Left & Right)",
+                "Bottom Bar",
+                "Dots Ring",
+            ]
+        )
+        self.wf_style_combo.currentIndexChanged.connect(self._mark_unsaved)
+        wf_row.addWidget(self.wf_style_combo)
+        app_lay.addLayout(wf_row)
+
+        wf_opts_row = QHBoxLayout()
+        wf_opts_row.setSpacing(14)
+        self.wf_mirror_chk = QCheckBox("Mirror waveform")
+        self.wf_mirror_chk.stateChanged.connect(self._mark_unsaved)
+        self.wf_idle_dots_chk = QCheckBox("Show dots when silent")
+        self.wf_idle_dots_chk.stateChanged.connect(self._mark_unsaved)
+        self.wf_maxw_spin = NoWheelSpinBox()
+        self.wf_maxw_spin.setRange(300, 900)
+        self.wf_maxw_spin.setSingleStep(20)
+        self.wf_maxw_spin.setPrefix("Max width: ")
+        self.wf_maxw_spin.setSuffix(" px")
+        self.wf_maxw_spin.valueChanged.connect(self._mark_unsaved)
+        wf_opts_row.addWidget(self.wf_mirror_chk)
+        wf_opts_row.addWidget(self.wf_idle_dots_chk)
+        wf_opts_row.addStretch()
+        wf_opts_row.addWidget(self.wf_maxw_spin)
+        app_lay.addLayout(wf_opts_row)
 
         self.save_win_size_chk = QCheckBox("Remember window size")
         self.save_win_size_chk.stateChanged.connect(self._mark_unsaved)
@@ -733,9 +930,13 @@ class SongPulseWindow(QMainWindow):
         sec2.setStyleSheet("font-size: 14px; font-weight: 600;")
         sys_lay.addWidget(sec2)
 
-        self.startup_chk = QCheckBox("Start automatically when Windows boots (hidden in tray)")
+        self.startup_chk = QCheckBox("Start automatically with Windows (hidden in tray)")
         self.startup_chk.stateChanged.connect(self._mark_unsaved)
         sys_lay.addWidget(self.startup_chk)
+
+        self.start_tray_chk = QCheckBox("Always minimize to tray when opening SongPulse")
+        self.start_tray_chk.stateChanged.connect(self._mark_unsaved)
+        sys_lay.addWidget(self.start_tray_chk)
 
         self.min_tray_chk = QCheckBox("Hide to system tray when minimized")
         self.min_tray_chk.stateChanged.connect(self._mark_unsaved)
@@ -745,6 +946,12 @@ class SongPulseWindow(QMainWindow):
         self.notif_chk.stateChanged.connect(self._mark_unsaved)
         sys_lay.addWidget(self.notif_chk)
 
+        self.always_hud_chk = QCheckBox(
+            "Always show bottom-right status pill while identifying (even when focused)"
+        )
+        self.always_hud_chk.stateChanged.connect(self._mark_unsaved)
+        sys_lay.addWidget(self.always_hud_chk)
+
         force_row = QHBoxLayout()
         self.force_overlay_chk = QCheckBox(
             "Force bottom-right popup (shows even when Do Not Disturb is on)"
@@ -753,8 +960,7 @@ class SongPulseWindow(QMainWindow):
         force_row.addWidget(self.force_overlay_chk)
         force_row.addWidget(
             HelpBadge(
-                "Shows SongPulse's own bottom-right popup card so Windows Do Not Disturb / Gaming Mode\n"
-                "cannot hide it. Turn off to use standard Windows notifications instead."
+                "Shows SongPulse's own bottom-right popup card so Windows Do Not Disturb cannot hide it."
             )
         )
         force_row.addStretch()
@@ -768,11 +974,26 @@ class SongPulseWindow(QMainWindow):
         self.autocopy_chk.stateChanged.connect(self._mark_unsaved)
         sys_lay.addWidget(self.autocopy_chk)
 
+        site_row = QHBoxLayout()
+        site_row.addLayout(
+            _label_with_help(
+                "Open Artist & Album On",
+                "Choose which music website opens when clicking an artist or album name in the info popup.",
+            )
+        )
+        site_row.addStretch()
+        self.info_site_combo = NoWheelComboBox()
+        for _key, label in PREFERRED_INFO_SITES:
+            self.info_site_combo.addItem(label, _key)
+        self.info_site_combo.currentIndexChanged.connect(self._mark_unsaved)
+        site_row.addWidget(self.info_site_combo)
+        sys_lay.addLayout(site_row)
+
         hk_row = QHBoxLayout()
         hk_row.addLayout(
             _label_with_help(
                 "Keyboard Shortcut",
-                "Global shortcut that works even inside fullscreen games or other apps.",
+                "Global shortcut that works inside fullscreen games and other apps.",
             )
         )
         hk_row.addStretch()
@@ -793,43 +1014,39 @@ class SongPulseWindow(QMainWindow):
         hk_mode_row.addLayout(
             _label_with_help(
                 "When Shortcut Is Pressed",
-                "'Use recent audio buffer' scans what you JUST heard immediately.\n"
-                "'Listen live' records fresh audio until matched or time limit is reached.",
+                "Choose whether the global shortcut scans the recent audio buffer or listens live.",
             )
         )
         hk_mode_row.addStretch()
         self.hk_mode_combo = NoWheelComboBox()
-        self.hk_mode_combo.addItems(["Use recent audio buffer", "Listen live (No AI)"])
+        self.hk_mode_combo.addItems(["Use recent audio buffer", "Listen live"])
         self.hk_mode_combo.currentIndexChanged.connect(self._mark_unsaved)
         hk_mode_row.addWidget(self.hk_mode_combo)
         sys_lay.addLayout(hk_mode_row)
-        layout.addWidget(sys_card)
 
         yt_row = QHBoxLayout()
         yt_row.addLayout(
             _label_with_help(
                 "yt-dlp Downloader App",
-                "Path to your yt-dlp downloader (.exe or .pyw). SongPulse opens it and auto-pastes the song's YouTube link.",
+                "Path to your yt-dlp downloader (.exe or .pyw).",
             )
         )
         self.ytdlp_path_input = QLineEdit()
         self.ytdlp_path_input.setPlaceholderText("Not set (will ask on first click)")
         self.ytdlp_path_input.textChanged.connect(self._mark_unsaved)
+        yt_find_btn = QPushButton("Auto-Find")
+        yt_find_btn.setObjectName("PlatformBtn")
+        yt_find_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        yt_find_btn.clicked.connect(self._autofind_ytdlp_app)
         yt_browse_btn = QPushButton("Browse")
         yt_browse_btn.setObjectName("PlatformBtn")
         yt_browse_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         yt_browse_btn.clicked.connect(self._browse_ytdlp_app)
         yt_row.addWidget(self.ytdlp_path_input, 1)
-        yt_row.addWidget(yt_browse_btn)
-        sys_lay.addLayout(yt_row)
-
-        yt_find_btn = QPushButton("Auto-Find")
-        yt_find_btn.setObjectName("PlatformBtn")
-        yt_find_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        yt_find_btn.clicked.connect(self._autofind_ytdlp_app)
-        yt_row.addWidget(self.ytdlp_path_input, 1)
         yt_row.addWidget(yt_find_btn)
         yt_row.addWidget(yt_browse_btn)
+        sys_lay.addLayout(yt_row)
+        layout.addWidget(sys_card)
 
         # 3. Audio & Timing
         aud_card = QFrame()
@@ -838,16 +1055,15 @@ class SongPulseWindow(QMainWindow):
         aud_lay.setContentsMargins(16, 14, 16, 14)
         aud_lay.setSpacing(10)
 
-        sec3 = QLabel("Audio & Timing")
+        sec3 = QLabel("Audio & Buffer")
         sec3.setStyleSheet("font-size: 14px; font-weight: 600;")
         aud_lay.addWidget(sec3)
 
         dev_row = QHBoxLayout()
         dev_row.addLayout(
             _label_with_help(
-                "Audio Outputs to Listen To",
-                "Pick which speakers/headphones SongPulse listens to.\n"
-                "You can check multiple outputs (e.g. direct headphones + FxSound).",
+                "Audio Outputs",
+                "Pick one or more speakers/headphones for SongPulse to listen to.",
             )
         )
         self.dev_combo = CheckableComboBox()
@@ -864,11 +1080,17 @@ class SongPulseWindow(QMainWindow):
         dev_row.addWidget(ref_btn)
         aud_lay.addLayout(dev_row)
 
+        self.enable_buf_chk = QCheckBox(
+            "Keep recent audio buffer in RAM (disable to save RAM; Listen Live still works)"
+        )
+        self.enable_buf_chk.stateChanged.connect(self._mark_unsaved)
+        aud_lay.addWidget(self.enable_buf_chk)
+
         buf_row = QHBoxLayout()
         buf_row.addLayout(
             _label_with_help(
-                "Audio History Length",
-                "How many seconds of recent audio SongPulse keeps ready in RAM (10–15s is ideal).",
+                "Audio Buffer Length",
+                "Seconds of recent audio kept in RAM when the buffer is enabled (10 to 15s is ideal).",
             )
         )
         buf_row.addStretch()
@@ -883,8 +1105,7 @@ class SongPulseWindow(QMainWindow):
         live_row.addLayout(
             _label_with_help(
                 "Max Live Listen Time",
-                "Listen Live keeps checking every few seconds until it finds a match,\n"
-                "or automatically gives up after this many seconds.",
+                "Maximum time Listen Live waits before finishing.",
             )
         )
         live_row.addStretch()
@@ -896,7 +1117,55 @@ class SongPulseWindow(QMainWindow):
         aud_lay.addLayout(live_row)
         layout.addWidget(aud_card)
 
-        # 4. Performance & GPU
+        # 4. Collapsible Optional AI Models
+        ai_card = QFrame()
+        ai_card.setObjectName("Card")
+        ai_lay = QVBoxLayout(ai_card)
+        ai_lay.setContentsMargins(16, 12, 16, 12)
+        ai_lay.setSpacing(8)
+
+        ai_head_row = QHBoxLayout()
+        self.ai_collapse_btn = QPushButton("▶  AI Models (Tricky Tracks)")
+        self.ai_collapse_btn.setObjectName("CollapseBtn")
+        self.ai_collapse_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.ai_collapse_btn.clicked.connect(self._toggle_ai_section)
+        ai_head_row.addWidget(self.ai_collapse_btn, 1)
+
+        self.add_custom_model_btn = QPushButton("+ Add Custom")
+        self.add_custom_model_btn.setObjectName("PlatformBtn")
+        self.add_custom_model_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.add_custom_model_btn.clicked.connect(self._add_custom_ai_model)
+        ai_head_row.addWidget(self.add_custom_model_btn)
+        ai_lay.addLayout(ai_head_row)
+
+        self.ai_body_widget = QWidget()
+        ai_body_lay = QVBoxLayout(self.ai_body_widget)
+        ai_body_lay.setContentsMargins(0, 4, 0, 0)
+        ai_body_lay.setSpacing(8)
+
+        eng_row = QHBoxLayout()
+        self.ai_engine_lbl = QLabel("")
+        self.ai_engine_lbl.setWordWrap(True)
+        self.ai_engine_lbl.setStyleSheet("font-size: 12px; font-weight: 600;")
+        self.install_ai_engine_btn = QPushButton("Download AI Engine")
+        self.install_ai_engine_btn.setObjectName("PrimaryBtn")
+        self.install_ai_engine_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.install_ai_engine_btn.clicked.connect(self._download_ai_engine)
+        eng_row.addWidget(self.ai_engine_lbl, 1)
+        eng_row.addWidget(self.install_ai_engine_btn)
+        ai_body_lay.addLayout(eng_row)
+
+        self.ai_models_container = QVBoxLayout()
+        self.ai_models_container.setSpacing(6)
+        self._ai_model_radio_group = QButtonGroup(self)
+        ai_body_lay.addLayout(self.ai_models_container)
+
+        self.ai_body_widget.hide()
+        self.add_custom_model_btn.hide()
+        ai_lay.addWidget(self.ai_body_widget)
+        layout.addWidget(ai_card)
+
+        # 5. Performance & GPU
         gpu_card = QFrame()
         gpu_card.setObjectName("Card")
         gpu_lay = QVBoxLayout(gpu_card)
@@ -909,16 +1178,10 @@ class SongPulseWindow(QMainWindow):
 
         gpu_chk_row = QHBoxLayout()
         self.gpu_auto_cpu_chk = QCheckBox(
-            "Switch AI cleanup to CPU while gaming / under high GPU load"
+            "Switch AI rescue to CPU while gaming or under high GPU load"
         )
         self.gpu_auto_cpu_chk.stateChanged.connect(self._mark_unsaved)
         gpu_chk_row.addWidget(self.gpu_auto_cpu_chk)
-        gpu_chk_row.addWidget(
-            HelpBadge(
-                "When your graphics card is busy (e.g. in a heavy game), SongPulse runs\n"
-                "AI voice/SFX cleanup on your CPU instead so your FPS doesn't drop."
-            )
-        )
         gpu_chk_row.addStretch()
         gpu_lay.addLayout(gpu_chk_row)
 
@@ -926,7 +1189,7 @@ class SongPulseWindow(QMainWindow):
         thresh_row.addLayout(
             _label_with_help(
                 "GPU Load Limit",
-                "If GPU usage is at or above this percentage, AI cleanup uses your CPU.",
+                "If GPU usage meets or exceeds this value, AI runs on CPU instead.",
             )
         )
         thresh_row.addStretch()
@@ -944,7 +1207,7 @@ class SongPulseWindow(QMainWindow):
         gpu_lay.addWidget(self.gpu_live_lbl)
 
         speed_row = QHBoxLayout()
-        self.gpu_speed_lbl = QLabel("AI speed: Run a quick test or scan a song with AI on")
+        self.gpu_speed_lbl = QLabel("AI speed: Run a test when an AI model is downloaded")
         self.gpu_speed_lbl.setObjectName("Muted")
         self.gpu_speed_lbl.setStyleSheet("font-size: 12px;")
         self.gpu_speed_lbl.setWordWrap(True)
@@ -957,7 +1220,33 @@ class SongPulseWindow(QMainWindow):
         gpu_lay.addLayout(speed_row)
         layout.addWidget(gpu_card)
 
-        # 5. Updates
+        # 6. Storage & Clean-Up
+        stor_card = QFrame()
+        stor_card.setObjectName("Card")
+        stor_lay = QVBoxLayout(stor_card)
+        stor_lay.setContentsMargins(16, 14, 16, 14)
+        stor_lay.setSpacing(8)
+
+        sec_stor = QLabel("Storage & Clean-Up")
+        sec_stor.setStyleSheet("font-size: 14px; font-weight: 600;")
+        stor_lay.addWidget(sec_stor)
+
+        stor_row = QHBoxLayout()
+        self.storage_summary_lbl = QLabel("Calculating app storage...")
+        self.storage_summary_lbl.setObjectName("Muted")
+        self.storage_summary_lbl.setWordWrap(True)
+        self.storage_summary_lbl.setStyleSheet("font-size: 12px;")
+
+        cleanup_btn = QPushButton("Clean Up Storage...")
+        cleanup_btn.setObjectName("PlatformBtn")
+        cleanup_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        cleanup_btn.clicked.connect(self._open_storage_cleanup)
+        stor_row.addWidget(self.storage_summary_lbl, 1)
+        stor_row.addWidget(cleanup_btn)
+        stor_lay.addLayout(stor_row)
+        layout.addWidget(stor_card)
+
+        # 7. Updates (Direct in-app self-updater)
         upd_card = QFrame()
         upd_card.setObjectName("Card")
         upd_lay = QVBoxLayout(upd_card)
@@ -983,66 +1272,149 @@ class SongPulseWindow(QMainWindow):
         upd_lay.addLayout(upd_row)
         layout.addWidget(upd_card)
 
-        layout.addStretch()
-        scroll = _make_clean_scroll(content, horizontal_off=True)
-        outer.addWidget(scroll, 1)
-
-        footer = QHBoxLayout()
+        # 8. Reset Defaults (moved to the very bottom of Settings scroll content!)
+        reset_card = QFrame()
+        reset_card.setObjectName("Card")
+        reset_lay = QHBoxLayout(reset_card)
+        reset_lay.setContentsMargins(16, 12, 16, 12)
+        reset_lbl = QLabel("Restore all SongPulse settings back to default values.")
+        reset_lbl.setObjectName("Muted")
+        reset_lbl.setWordWrap(True)
+        reset_lbl.setStyleSheet("font-size: 12px;")
         reset_btn = QPushButton("Reset Defaults")
         reset_btn.setObjectName("DangerBtn")
         reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         reset_btn.clicked.connect(self._reset_settings)
+        reset_lay.addWidget(reset_lbl, 1)
+        reset_lay.addWidget(reset_btn)
+        layout.addWidget(reset_card)
+
+        layout.addStretch(1)
+
+        scroll_h.addStretch(1)
+        scroll_h.addWidget(center_col, 10)
+        scroll_h.addStretch(1)
+
+        self.settings_scroll = _make_clean_scroll(scroll_inner, horizontal_off=True)
+        page_lay.addWidget(self.settings_scroll, 1)
+
+        # Sticky footer bar: Discard Changes + Save Settings
+        footer_wrap = QWidget()
+        footer_outer = QHBoxLayout(footer_wrap)
+        footer_outer.setContentsMargins(22, 8, 22, 14)
+
+        footer_inner = QWidget()
+        footer_inner.setMaximumWidth(920)
+        footer = QHBoxLayout(footer_inner)
+        footer.setContentsMargins(0, 0, 0, 0)
+
+        self.discard_changes_btn = QPushButton("Discard Changes")
+        self.discard_changes_btn.setObjectName("DangerBtn")
+        self.discard_changes_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.discard_changes_btn.clicked.connect(self._discard_unsaved_settings)
+        self.discard_changes_btn.hide()
 
         save_btn = QPushButton("Save Settings")
         save_btn.setObjectName("PrimaryBtn")
         save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         save_btn.clicked.connect(self._save_settings_from_ui)
 
-        self.discard_btn = QPushButton("Discard")
-        self.discard_btn.setObjectName("PlatformBtn")
-        self.discard_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.discard_btn.clicked.connect(self._discard_unsaved_settings)
-        self.discard_btn.hide()
-
-        footer.addWidget(reset_btn)
+        footer.addWidget(self.discard_changes_btn)
         footer.addStretch()
         footer.addWidget(save_btn)
-        outer.addLayout(footer)
 
-        outer_h.addStretch(1)
-        outer_h.addWidget(center_col, 10)
-        outer_h.addStretch(1)
+        footer_outer.addStretch(1)
+        footer_outer.addWidget(footer_inner, 10)
+        footer_outer.addStretch(1)
+        page_lay.addWidget(footer_wrap)
 
         self._populate_settings_ui()
         return page
 
+    def _set_ai_section_expanded(self, expanded: bool):
+        self._ai_section_expanded = bool(expanded)
+        self.ai_body_widget.setVisible(self._ai_section_expanded)
+        self.add_custom_model_btn.setVisible(self._ai_section_expanded)
+        self._update_ai_collapse_header()
+
+    def _toggle_ai_section(self):
+        self._set_ai_section_expanded(not self._ai_section_expanded)
+
+    def _update_ai_collapse_header(self):
+        if not hasattr(self, "ai_collapse_btn"):
+            return
+        arrow = "▼" if self._ai_section_expanded else "▶"
+        n_dl = len(get_downloaded_ai_models())
+        self.ai_collapse_btn.setText(f"{arrow}  AI Models (Tricky Tracks)  •  {n_dl} downloaded")
+
+    def _refresh_theme_dropdown(self, select_key: str):
+        self.theme_combo.blockSignals(True)
+        self.theme_combo.clear()
+        choices = list_all_theme_choices()
+        target_idx = 0
+        for idx, (key, label) in enumerate(choices):
+            self.theme_combo.addItem(label, key)
+            if key == select_key:
+                target_idx = idx
+        self.theme_combo.setCurrentIndex(target_idx)
+        self.theme_combo.blockSignals(False)
+
+    def _open_create_theme_dialog(self):
+        dlg = CustomThemeDialog(parent=self)
+        if dlg.exec() and dlg.created_theme_key:
+            self._refresh_theme_dropdown(dlg.created_theme_key)
+            self._mark_unsaved()
+
     def _populate_settings_ui(self):
         self._suppress_unsaved = True
         try:
-            mode_map = {"auto": 0, "dark": 1, "light": 2}
-            self.theme_combo.setCurrentIndex(
-                mode_map.get(self.settings.get("theme", "auto"), 0)
+            self._refresh_theme_dropdown(self.settings.get("theme", "auto"))
+
+            wf_map = {"auto": 0, "radial": 1, "horizontal": 2, "pulse_line": 3, "bar": 4, "dots": 5}
+            self.wf_style_combo.setCurrentIndex(
+                wf_map.get(self.settings.get("waveform_style", "auto"), 0)
             )
+            self.wf_mirror_chk.setChecked(bool(self.settings.get("waveform_mirror", False)))
+            self.wf_idle_dots_chk.setChecked(bool(self.settings.get("waveform_idle_dots", False)))
+            self.wf_maxw_spin.setValue(int(self.settings.get("waveform_max_width", 620)))
+
             self.save_win_size_chk.setChecked(
                 bool(self.settings.get("save_window_size", True))
             )
             self.startup_chk.setChecked(is_startup_enabled())
+            self.start_tray_chk.setChecked(
+                bool(self.settings.get("start_minimized_to_tray", False))
+            )
             self.min_tray_chk.setChecked(
                 bool(self.settings.get("minimize_to_tray", True))
             )
             self.notif_chk.setChecked(
                 bool(self.settings.get("show_notifications", True))
             )
+            self.always_hud_chk.setChecked(
+                bool(self.settings.get("always_show_status_hud", True))
+            )
             self.force_overlay_chk.setChecked(
                 bool(self.settings.get("force_overlay_notification", True))
             )
             self.ping_chk.setChecked(bool(self.settings.get("play_ping_sound", True)))
             self.autocopy_chk.setChecked(bool(self.settings.get("auto_copy", False)))
+
+            pref_site = self.settings.get("preferred_info_site", "auto")
+            for idx in range(self.info_site_combo.count()):
+                if self.info_site_combo.itemData(idx) == pref_site:
+                    self.info_site_combo.setCurrentIndex(idx)
+                    break
+
             self.hk_input.setText(self.settings.get("hotkey", "ctrl+alt+s"))
             self.hk_mode_combo.setCurrentIndex(
                 1 if self.settings.get("hotkey_mode") == "live" else 0
             )
+            self.enable_buf_chk.setChecked(
+                bool(self.settings.get("enable_audio_buffer", True))
+            )
             self.buf_spin.setValue(int(self.settings.get("buffer_seconds", 12)))
+            self.buf_spin.setEnabled(self.enable_buf_chk.isChecked())
             self.live_spin.setValue(int(self.settings.get("live_max_seconds", 20)))
             self.gpu_auto_cpu_chk.setChecked(
                 bool(self.settings.get("gpu_auto_cpu", True))
@@ -1057,9 +1429,12 @@ class SongPulseWindow(QMainWindow):
             )
             self.has_unsaved_settings = False
             self.unsaved_lbl.setText("")
+            self.discard_changes_btn.hide()
             self.ytdlp_path_input.setText(self.settings.get("ytdlp_app_path", ""))
         finally:
             self._suppress_unsaved = False
+        self._rebuild_ai_models_ui()
+        self._refresh_storage_summary()
         self._update_gpu_indicator()
 
     def _mark_unsaved(self, *_args):
@@ -1067,27 +1442,36 @@ class SongPulseWindow(QMainWindow):
             return
         self.has_unsaved_settings = True
         self.unsaved_lbl.setText("Previewing unsaved changes")
-        if hasattr(self, "discard_btn"):
-            self.discard_btn.show()
+        self.discard_changes_btn.show()
         self._apply_live_settings()
 
     def _apply_live_settings(self):
-        """Applies Settings UI values immediately in memory without writing settings.json yet."""
         old_devices = list(self.settings.get("target_devices", []))
         old_all = bool(self.settings.get("monitor_all_devices", True))
         old_buf = int(self.settings.get("buffer_seconds", 12))
+        old_buf_en = bool(self.settings.get("enable_audio_buffer", True))
 
-        themes = ["auto", "dark", "light"]
-        self.settings["theme"] = themes[self.theme_combo.currentIndex()]
+        self.settings["theme"] = self.theme_combo.currentData() or "auto"
+        wf_styles = ["auto", "radial", "horizontal", "pulse_line", "bar", "dots"]
+        self.settings["waveform_style"] = wf_styles[max(0, self.wf_style_combo.currentIndex())]
+        self.settings["waveform_mirror"] = self.wf_mirror_chk.isChecked()
+        self.settings["waveform_idle_dots"] = self.wf_idle_dots_chk.isChecked()
+        self.settings["waveform_max_width"] = self.wf_maxw_spin.value()
+
         self.settings["save_window_size"] = self.save_win_size_chk.isChecked()
+        self.settings["start_minimized_to_tray"] = self.start_tray_chk.isChecked()
         self.settings["minimize_to_tray"] = self.min_tray_chk.isChecked()
         self.settings["show_notifications"] = self.notif_chk.isChecked()
+        self.settings["always_show_status_hud"] = self.always_hud_chk.isChecked()
         self.settings["force_overlay_notification"] = self.force_overlay_chk.isChecked()
         self.settings["play_ping_sound"] = self.ping_chk.isChecked()
         self.settings["auto_copy"] = self.autocopy_chk.isChecked()
+        self.settings["preferred_info_site"] = self.info_site_combo.currentData() or "auto"
         self.settings["hotkey_mode"] = (
             "live" if self.hk_mode_combo.currentIndex() == 1 else "buffer"
         )
+        self.settings["enable_audio_buffer"] = self.enable_buf_chk.isChecked()
+        self.buf_spin.setEnabled(self.settings["enable_audio_buffer"])
         self.settings["buffer_seconds"] = self.buf_spin.value()
         self.settings["live_max_seconds"] = self.live_spin.value()
         self.settings["ytdlp_app_path"] = self.ytdlp_path_input.text().strip()
@@ -1103,16 +1487,15 @@ class SongPulseWindow(QMainWindow):
             self.settings["monitor_all_devices"] = False
             self.settings["target_devices"] = checked_devs
 
-        # Instant visual & telemetry updates
-        self.apply_theme()
+        self.apply_theme(force=True)
         self._update_gpu_indicator()
         self._refresh_identify_header()
 
-        # Debounce audio engine restarts so rapid clicks / spinbox stepping stay smooth
         if (
             self.settings["target_devices"] != old_devices
             or self.settings["monitor_all_devices"] != old_all
             or self.settings["buffer_seconds"] != old_buf
+            or self.settings["enable_audio_buffer"] != old_buf_en
         ):
             self._audio_reconfig_timer.start(250)
 
@@ -1121,6 +1504,7 @@ class SongPulseWindow(QMainWindow):
             self.settings.get("target_devices", []),
             self.settings.get("monitor_all_devices", True),
             self.settings.get("buffer_seconds", 12),
+            enable_buffer=self.settings.get("enable_audio_buffer", True),
         )
         self._refresh_identify_header()
 
@@ -1139,7 +1523,6 @@ class SongPulseWindow(QMainWindow):
         self._audio_reconfig_timer.stop()
         self._apply_live_settings()
 
-        # Validate & commit shortcut
         old_saved_hk = self._saved_settings_snapshot.get("hotkey", "ctrl+alt+s")
         new_hk = self.hk_input.text().strip().lower()
         if new_hk and new_hk != self.settings.get("hotkey"):
@@ -1163,15 +1546,12 @@ class SongPulseWindow(QMainWindow):
 
         set_startup_enabled(self.startup_chk.isChecked())
         save_settings(self.settings)
-
-        # Ensure audio engine matches saved settings immediately
         self._apply_audio_reconfig_now()
 
-        # Refresh saved snapshots
         self._saved_settings_snapshot = copy.deepcopy(self.settings)
         self._saved_startup_snapshot = self.startup_chk.isChecked()
         self.has_unsaved_settings = False
-        self.discard_btn.hide()
+        self.discard_changes_btn.hide()
         self._refresh_identify_header()
         self.unsaved_lbl.setText("Saved!")
         QTimer.singleShot(
@@ -1180,11 +1560,11 @@ class SongPulseWindow(QMainWindow):
         )
 
     def _discard_unsaved_settings(self):
-        """Reverts every live-previewed change back to the last saved state."""
         self._audio_reconfig_timer.stop()
         prev_devices = list(self.settings.get("target_devices", []))
         prev_all = bool(self.settings.get("monitor_all_devices", True))
         prev_buf = int(self.settings.get("buffer_seconds", 12))
+        prev_buf_en = bool(self.settings.get("enable_audio_buffer", True))
 
         self.settings = copy.deepcopy(self._saved_settings_snapshot)
         self._register_hotkey(self.settings.get("hotkey", "ctrl+alt+s"))
@@ -1194,14 +1574,14 @@ class SongPulseWindow(QMainWindow):
             self.settings.get("target_devices", []) != prev_devices
             or bool(self.settings.get("monitor_all_devices", True)) != prev_all
             or int(self.settings.get("buffer_seconds", 12)) != prev_buf
+            or bool(self.settings.get("enable_audio_buffer", True)) != prev_buf_en
         ):
             self._apply_audio_reconfig_now()
 
         self._populate_settings_ui()
-        self.apply_theme()
+        self.apply_theme(force=True)
         self._refresh_identify_header()
-        self.discard_btn.hide()
-        self.unsaved_lbl.setText("Changes reverted")
+        self.unsaved_lbl.setText("Changes discarded")
         QTimer.singleShot(
             2000,
             lambda: self.unsaved_lbl.setText("") if not self.has_unsaved_settings else None,
@@ -1222,14 +1602,13 @@ class SongPulseWindow(QMainWindow):
         self._saved_settings_snapshot = copy.deepcopy(self.settings)
         self._register_hotkey(self.settings["hotkey"])
         self._apply_audio_reconfig_now()
-        self.quick_ai_chk.setChecked(self.settings["use_ai_separation"])
+        self._disable_ai_checkbox_cleanly()
         self.is_pinned = False
         set_window_always_on_top(int(self.winId()), False)
         self._update_pin_button_ui()
         self._populate_settings_ui()
-        self.apply_theme()
+        self.apply_theme(force=True)
         self._refresh_identify_header()
-        self.discard_btn.hide()
         self.unsaved_lbl.setText("Defaults restored")
         QTimer.singleShot(
             2000,
@@ -1266,27 +1645,347 @@ class SongPulseWindow(QMainWindow):
         if found:
             self.ytdlp_path_input.setText(found)
         else:
-            QMessageBox.information(
-                self,
-                "Not Found Automatically",
-                "Could not auto-detect yt-dlp Downloader. Click Browse (opens AppData directly) to select it.",
-            )
+            chosen = prompt_install_or_locate_ytdlp(self)
+            if chosen:
+                self.ytdlp_path_input.setText(chosen)
 
     def _on_ytdlp_path_picked(self, path: str):
         self.settings["ytdlp_app_path"] = path
+        self._saved_settings_snapshot["ytdlp_app_path"] = path
         save_settings(self.settings)
         if hasattr(self, "ytdlp_path_input"):
             self._suppress_unsaved = True
             self.ytdlp_path_input.setText(path)
             self._suppress_unsaved = False
 
+    # --- OPTIONAL AI MODELS & STORAGE CLEAN-UP ---
+    def _all_ai_model_entries(self) -> list[dict]:
+        entries = [dict(m) for m in AI_MODEL_CATALOG]
+        known = {e["filename"] for e in entries}
+
+        for fn in list(self.settings.get("custom_ai_models", [])) + get_downloaded_ai_models():
+            item_id = str(fn).strip()
+            if not item_id or item_id in known:
+                continue
+            if is_whisper_model_id(item_id) or item_id.lower().endswith(AI_MODEL_EXTENSIONS):
+                known.add(item_id)
+                entries.append(
+                    {
+                        "filename": item_id,
+                        "name": os.path.splitext(os.path.basename(item_id))[0],
+                        "tag": "Custom",
+                        "description": "User-added custom rescue model.",
+                        "size_mb": 0,
+                        "type": "Custom",
+                        "url": "",
+                    }
+                )
+        return entries
+
+    def _rebuild_ai_models_ui(self):
+        if not hasattr(self, "ai_models_container"):
+            return
+
+        engine_ok = is_ai_engine_installed()
+        self.model_mgr.refresh_capabilities()
+        if engine_ok:
+            hw = "GPU Ready (CUDA)" if self.model_mgr.gpu_available else "CPU Mode"
+            self.ai_engine_lbl.setText(f"AI Engine: Installed ({hw})")
+            self.install_ai_engine_btn.hide()
+        else:
+            self.ai_engine_lbl.setText(
+                "AI Engine: Not installed (optional, saves ~800 MB)"
+            )
+            self.install_ai_engine_btn.show()
+
+        for btn in list(self._ai_model_radio_group.buttons()):
+            self._ai_model_radio_group.removeButton(btn)
+        while self.ai_models_container.count():
+            it = self.ai_models_container.takeAt(0)
+            if it and it.widget():
+                it.widget().deleteLater()
+
+        active_model = self.settings.get("ai_model", UVR_MODEL_NAME)
+        for entry in self._all_ai_model_entries():
+            fn = entry["filename"]
+            downloaded = is_model_downloaded(fn)
+            if downloaded:
+                p = get_model_file_path(fn)
+                if os.path.isdir(p):
+                    fsize = sum(
+                        os.path.getsize(os.path.join(r, f))
+                        for r, _d, fs in os.walk(p)
+                        for f in fs
+                    )
+                else:
+                    fsize = os.path.getsize(p)
+            else:
+                fsize = 0
+
+            row_frame = QFrame()
+            row_frame.setObjectName("SongCard")
+            row_lay = QHBoxLayout(row_frame)
+            row_lay.setContentsMargins(10, 8, 10, 8)
+            row_lay.setSpacing(10)
+
+            radio = QRadioButton()
+            radio.setEnabled(downloaded)
+            radio.setChecked(downloaded and fn == active_model)
+            radio.setToolTip(
+                "Select active AI model" if downloaded else "Download first to select"
+            )
+            radio.toggled.connect(
+                lambda checked, m=fn: self._on_select_ai_model(m) if checked else None
+            )
+            self._ai_model_radio_group.addButton(radio)
+            row_lay.addWidget(radio, alignment=Qt.AlignmentFlag.AlignTop)
+
+            info_col = QVBoxLayout()
+            info_col.setSpacing(2)
+            tag_txt = f"  •  {entry['tag']}" if entry.get("tag") else ""
+            name_lbl = QLabel(f"{entry['name']}{tag_txt}")
+            name_lbl.setStyleSheet("font-size: 12px; font-weight: 600;")
+            desc_lbl = QLabel(entry.get("description", ""))
+            desc_lbl.setObjectName("Muted")
+            desc_lbl.setWordWrap(True)
+            desc_lbl.setStyleSheet("font-size: 11px;")
+
+            if downloaded:
+                st_txt = f"Downloaded • {format_bytes(fsize)} • {fn}"
+            else:
+                est = f"~{entry['size_mb']} MB" if entry.get("size_mb") else "Custom"
+                st_txt = f"Not downloaded ({est}) • {fn}"
+            st_lbl = QLabel(st_txt)
+            st_lbl.setObjectName("Muted")
+            st_lbl.setStyleSheet("font-size: 10px;")
+
+            info_col.addWidget(name_lbl)
+            info_col.addWidget(desc_lbl)
+            info_col.addWidget(st_lbl)
+            row_lay.addLayout(info_col, 1)
+
+            if downloaded:
+                del_btn = QPushButton("Delete")
+                del_btn.setObjectName("DangerBtn")
+                del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                del_btn.clicked.connect(lambda checked=False, m=fn: self._delete_ai_model(m))
+                row_lay.addWidget(del_btn)
+            else:
+                dl_btn = QPushButton("Download")
+                dl_btn.setObjectName("PlatformBtn")
+                dl_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                dl_btn.clicked.connect(
+                    lambda checked=False, m=fn, u=entry.get("url", ""): self._download_ai_model(m, u)
+                )
+                row_lay.addWidget(dl_btn)
+
+            self.ai_models_container.addWidget(row_frame)
+
+        self._update_ai_collapse_header()
+        self._refresh_ai_footer_status()
+
+    def _on_select_ai_model(self, filename: str):
+        self.settings["ai_model"] = filename
+        self._saved_settings_snapshot["ai_model"] = filename
+        save_settings(self.settings)
+        self.model_mgr.set_active_model(filename)
+        self._refresh_ai_footer_status()
+
+    def _download_ai_engine(self):
+        worker = AiRuntimeDownloadWorker()
+        dlg = DownloadProgressDialog(
+            "Download Optional AI Engine",
+            "Preparing to download optional AI rescue engine...",
+            worker,
+            parent=self,
+        )
+        dlg.exec()
+        if dlg.succeeded:
+            self.model_mgr.refresh_capabilities()
+            self._rebuild_ai_models_ui()
+            self._refresh_storage_summary()
+            self._update_gpu_indicator()
+            QMessageBox.information(
+                self,
+                "AI Engine Installed",
+                "Optional AI Engine installed. You can now download any rescue model below.",
+            )
+        elif not dlg.was_cancelled and dlg.error_msg:
+            QMessageBox.warning(self, "Download Failed", dlg.error_msg)
+
+    def _download_ai_model(self, filename: str, url: str = ""):
+        worker = ModelDownloadWorker(filename, url)
+        dlg = DownloadProgressDialog(
+            f"Downloading {filename}",
+            f"Downloading AI model {filename}...",
+            worker,
+            parent=self,
+        )
+        dlg.exec()
+        if dlg.succeeded:
+            self._on_select_ai_model(filename)
+            self._rebuild_ai_models_ui()
+            self._refresh_storage_summary()
+            self._update_gpu_indicator()
+        elif not dlg.was_cancelled and dlg.error_msg:
+            QMessageBox.warning(
+                self, "Model Download Failed", f"Could not download {filename}:\n{dlg.error_msg}"
+            )
+
+    def _delete_ai_model(self, filename: str):
+        reply = QMessageBox.question(
+            self,
+            "Delete AI Model",
+            f"Delete '{filename}' to free disk space?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        path = get_model_file_path(filename)
+        try:
+            if os.path.isdir(path):
+                shutil.rmtree(path, ignore_errors=True)
+            elif os.path.isfile(path):
+                os.remove(path)
+        except OSError as e:
+            QMessageBox.warning(self, "Delete Failed", str(e))
+            return
+
+        self.model_mgr.unload()
+        if self.settings.get("ai_model") == filename:
+            remaining = get_downloaded_ai_models()
+            if remaining:
+                self._on_select_ai_model(remaining[0])
+            else:
+                self._disable_ai_checkbox_cleanly()
+        self._rebuild_ai_models_ui()
+        self._refresh_storage_summary()
+
+    def _add_custom_ai_model(self):
+        picked, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import Custom UVR AI Model",
+            os.path.expanduser("~"),
+            "UVR AI Models (*.onnx *.pth *.ckpt);;All Files (*.*)",
+        )
+        if not picked:
+            return
+        base = os.path.basename(picked)
+        dest = os.path.join(MODELS_DIR, base)
+        try:
+            if os.path.abspath(picked) != os.path.abspath(dest):
+                shutil.copy2(picked, dest)
+        except Exception as e:
+            QMessageBox.warning(self, "Import Failed", f"Could not copy model file:\n{e}")
+            return
+
+        customs = list(self.settings.get("custom_ai_models", []))
+        if base not in customs:
+            customs.append(base)
+            self.settings["custom_ai_models"] = customs
+            self._saved_settings_snapshot["custom_ai_models"] = list(customs)
+        self._on_select_ai_model(base)
+        self._rebuild_ai_models_ui()
+        self._refresh_storage_summary()
+        QMessageBox.information(
+            self, "Model Added", f"Custom model '{base}' imported and selected."
+        )
+
+    def _disable_ai_checkbox_cleanly(self):
+        self.settings["use_ai_separation"] = False
+        self._saved_settings_snapshot["use_ai_separation"] = False
+        save_settings(self.settings)
+        if hasattr(self, "quick_ai_chk"):
+            self.quick_ai_chk.blockSignals(True)
+            self.quick_ai_chk.setChecked(False)
+            self.quick_ai_chk.blockSignals(False)
+            self.ai_warn_banner.setVisible(False)
+
+    def _refresh_storage_summary(self):
+        if not hasattr(self, "storage_summary_lbl"):
+            return
+        info = get_storage_breakdown(self.history)
+        parts = [f"{len(info['models'])} AI model(s)", f"{len(info['all_cover_files'])} cover(s)"]
+        if info["temp_bytes"] > 0:
+            parts.append(f"{format_bytes(info['temp_bytes'])} temp")
+        if info["ai_runtime_bytes"] > 0:
+            parts.append(f"{format_bytes(info['ai_runtime_bytes'])} AI engine")
+        self.storage_summary_lbl.setText(
+            f"Total SongPulse data: {format_bytes(info['total_bytes'])}  •  " + ", ".join(parts)
+        )
+
+    def _open_storage_cleanup(self):
+        dlg = StorageCleanupDialog(self.history, parent=self)
+        dlg.exec()
+        if dlg.cleared_history:
+            self.history = []
+            self.selected_song_ids.clear()
+            self.result_card.hide()
+            self.refresh_library()
+        elif dlg.cleared_covers:
+            self.refresh_library()
+        if dlg.deleted_models or dlg.removed_ai_runtime:
+            self.model_mgr.unload()
+            self.model_mgr.refresh_capabilities()
+            if not is_model_ready(self.settings.get("ai_model", UVR_MODEL_NAME)):
+                remaining = [m for m in get_downloaded_ai_models() if is_model_ready(m)]
+                if remaining:
+                    self._on_select_ai_model(remaining[0])
+                else:
+                    self._disable_ai_checkbox_cleanly()
+            self._rebuild_ai_models_ui()
+            self._update_gpu_indicator()
+        self._refresh_storage_summary()
+
+    def _refresh_ai_footer_status(self):
+        if not hasattr(self, "model_dot"):
+            return
+        engine_ok = is_ai_engine_installed()
+        downloaded = get_downloaded_ai_models()
+        active = self.settings.get("ai_model", UVR_MODEL_NAME)
+        if not engine_ok:
+            self.model_dot.setStyleSheet("color: #71717A; font-size: 10px;")
+            self.model_status_lbl.setText("AI: Optional")
+            self.ai_foot_widget.setToolTip(
+                "Optional AI Rescue engine is not installed. Go to Settings -> AI Models."
+            )
+        elif not downloaded:
+            self.model_dot.setStyleSheet("color: #71717A; font-size: 10px;")
+            self.model_status_lbl.setText("AI: No model")
+            self.ai_foot_widget.setToolTip(
+                "No AI model downloaded. Download one in Settings -> AI Models."
+            )
+        else:
+            mode = "GPU" if self.model_mgr.gpu_available else "CPU"
+            model_short = active if is_model_downloaded(active) else downloaded[0]
+            self.model_dot.setStyleSheet("color: #22C55E; font-size: 10px;")
+            self.model_status_lbl.setText(f"AI Ready ({mode})")
+            self.ai_foot_widget.setToolTip(f"AI Rescue Ready ({mode}) • {model_short}")
+
+    def _start_model_preload(self, model_filename: str):
+        self.model_dot.setStyleSheet("color: #F59E0B; font-size: 10px;")
+        self.model_status_lbl.setText("Loading AI...")
+        self.model_loader = ModelLoaderThread(self.model_mgr, model_filename)
+        self.model_loader.loaded.connect(self._on_model_loaded)
+        self.model_loader.failed.connect(self._on_model_failed)
+        self.model_loader.start()
+
     # --- LIVE WAVEFORM & PERIODIC TICK ---
     def _tick_waveform(self):
         if not self.isVisible() or self.pages.currentIndex() != 0:
             return
         has_out = len(self.engine.monitored_names) > 0
-        bands, rms = self.engine.get_live_waveform(28) if has_out else (None, 0.0)
-        self.pulse_btn.step_animation(bands, rms, has_outputs=has_out)
+        if has_out:
+            bands, left_b, right_b, rms = self.engine.get_live_waveform_stereo(WAVEFORM_BARS)
+        else:
+            bands, left_b, right_b, rms = None, None, None, 0.0
+        self.pulse_btn.step_animation(
+            bands,
+            rms,
+            has_outputs=has_out,
+            left_bands=left_b,
+            right_bands=right_b,
+        )
 
     def _on_periodic_tick(self):
         if self.settings.get("theme", "auto") == "auto":
@@ -1326,9 +2025,21 @@ class SongPulseWindow(QMainWindow):
     def _run_speed_benchmark(self):
         if self.bench_worker and self.bench_worker.isRunning():
             return
+        active = self.settings.get("ai_model", UVR_MODEL_NAME)
+        if not is_model_ready(active):
+            ready = [m for m in get_downloaded_ai_models() if is_model_ready(m)]
+            if ready:
+                active = ready[0]
+            else:
+                QMessageBox.information(
+                    self,
+                    "AI Model Required",
+                    "Download an AI model in Settings -> AI Models before running the speed test.",
+                )
+                return
         self.bench_btn.setEnabled(False)
         self.bench_btn.setText("Testing...")
-        self.bench_worker = BenchmarkWorker(self.model_mgr)
+        self.bench_worker = BenchmarkWorker(self.model_mgr, model_filename=active)
         self.bench_worker.progress.connect(self.gpu_speed_lbl.setText)
         self.bench_worker.finished_bench.connect(self._on_bench_done)
         self.bench_worker.error.connect(self._on_bench_error)
@@ -1344,7 +2055,7 @@ class SongPulseWindow(QMainWindow):
         self.bench_btn.setText("Run Speed Test")
         self.gpu_speed_lbl.setText(f"Speed test failed: {err}")
 
-    # --- GITHUB UPDATER ---
+    # --- DIRECT IN-APP GITHUB UPDATER ---
     def _check_for_updates(self):
         if self.update_worker and self.update_worker.isRunning():
             return
@@ -1361,21 +2072,45 @@ class SongPulseWindow(QMainWindow):
         self.upd_btn.setText("Check for Updates")
         latest = info["latest_version"]
         if info["is_newer"]:
-            self.upd_status_lbl.setText(f"Update available: v{latest} (installed: v{APP_VERSION})")
-            msg = f"SongPulse v{latest} is available!\n\n"
-            if info["notes"]:
-                msg += info["notes"][:400] + "\n\n"
-            msg += "Open the download link in your browser?"
-            reply = QMessageBox.question(
-                self,
-                "Update Available",
-                msg,
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            self.upd_status_lbl.setText(
+                f"Update available: v{latest} (installed: v{APP_VERSION})"
             )
-            if reply == QMessageBox.StandardButton.Yes:
-                webbrowser.open(info["download_url"])
+            box = QMessageBox(self)
+            box.setWindowTitle("Update Available")
+            box.setIcon(QMessageBox.Icon.Information)
+            box.setText(f"SongPulse v{latest} is available!")
+            if info["notes"]:
+                box.setInformativeText(info["notes"][:450])
+            btn_update = None
+            if info.get("has_direct_exe"):
+                btn_update = box.addButton("Update Now", QMessageBox.ButtonRole.AcceptRole)
+            btn_browser = box.addButton("View Release", QMessageBox.ButtonRole.ActionRole)
+            box.addButton("Later", QMessageBox.ButtonRole.RejectRole)
+            if btn_update:
+                box.setDefaultButton(btn_update)
+            box.exec()
+
+            clicked = box.clickedButton()
+            if btn_update and clicked == btn_update:
+                self._run_direct_update(info["download_url"], latest)
+            elif clicked == btn_browser:
+                webbrowser.open(info["release_url"])
         else:
             self.upd_status_lbl.setText(f"Up to date (v{APP_VERSION} • latest: v{latest})")
+
+    def _run_direct_update(self, download_url: str, version_str: str):
+        worker = AppUpdateWorker(download_url, version_str)
+        dlg = DownloadProgressDialog(
+            f"Updating SongPulse to v{version_str}",
+            f"Downloading SongPulse v{version_str}...",
+            worker,
+            parent=self,
+        )
+        dlg.exec()
+        if dlg.succeeded:
+            self.quit_app(force=True)
+        elif not dlg.was_cancelled and dlg.error_msg:
+            QMessageBox.warning(self, "Update Failed", dlg.error_msg)
 
     def _on_update_error(self, err):
         self.upd_btn.setEnabled(True)
@@ -1385,7 +2120,7 @@ class SongPulseWindow(QMainWindow):
     # --- SYSTEM TRAY & WINDOW STATE ---
     def _build_tray(self):
         self.tray = QSystemTrayIcon(self.app_icon, self)
-        self.tray.setToolTip(f"{APP_NAME} v{APP_VERSION} — Listening in background")
+        self.tray.setToolTip(f"{APP_NAME} v{APP_VERSION} (Background)")
 
         menu = QMenu()
         act_open = QAction("Open SongPulse", self)
@@ -1394,7 +2129,7 @@ class SongPulseWindow(QMainWindow):
         act_buf = QAction("Identify Last Audio", self)
         act_buf.triggered.connect(lambda: self.trigger_identify(mode="buffer"))
 
-        act_live = QAction("Listen Live (No AI)", self)
+        act_live = QAction("Listen Live", self)
         act_live.triggered.connect(lambda: self.trigger_identify(mode="live"))
 
         act_quit = QAction("Quit", self)
@@ -1418,12 +2153,43 @@ class SongPulseWindow(QMainWindow):
             self.show_and_focus()
 
     def show_and_focus(self):
+        self.setWindowState(
+            (self.windowState() & ~Qt.WindowState.WindowMinimized)
+            | Qt.WindowState.WindowActive
+        )
+        self.show()
         self.showNormal()
-        self.activateWindow()
         self.raise_()
+        self.activateWindow()
+        QApplication.setActiveWindow(self)
+        _force_focus_window(int(self.winId()))
         set_windows_titlebar_theme(int(self.winId()), bool(self.last_dark_state))
         if self.is_pinned:
             set_window_always_on_top(int(self.winId()), True)
+
+    def _on_notification_clicked(self, song: dict):
+        """Brings SongPulse cleanly into foreground focus on the song's detail view with active hover/glow."""
+        if song:
+            self._open_song_details(song)
+        self.show_and_focus()
+        # Re-assert foreground focus & mouse hover tracking right after popup closes
+        QTimer.singleShot(35, self._focus_after_notification)
+
+    def _focus_after_notification(self):
+        self.show_and_focus()
+        self.detail_page.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
+        self.detail_page.update()
+
+    def open_song_by_id(self, song_id: str):
+        target = next((s for s in self.history if s.get("id") == song_id), None)
+        if target is None and self.current_result_song and self.current_result_song.get("id") == song_id:
+            target = self.current_result_song
+        if target is None and self.history:
+            target = self.history[0]
+        if target:
+            self._open_song_details(target)
+        self.show_and_focus()
+        QTimer.singleShot(35, self._focus_after_notification)
 
     def _persist_window_size(self):
         if (
@@ -1468,21 +2234,72 @@ class SongPulseWindow(QMainWindow):
         if force:
             os._exit(0)
 
-    # --- THEME ---
-    def apply_theme(self):
-        mode = self.settings.get("theme", "auto")
-        dark = is_windows_dark_mode() if mode == "auto" else (mode == "dark")
-        if dark != self.last_dark_state:
-            self.last_dark_state = dark
-            app = QApplication.instance()
-            app.setPalette(build_palette(dark))
-            app.setStyleSheet(build_stylesheet(dark, self.chevrons))
-            set_windows_titlebar_theme(int(self.winId()), dark)
-            self.pulse_btn.set_dark(dark)
-            self.detail_page.set_theme_dark(dark)
-            self._refresh_theme_icons()
-            if self.pages.currentIndex() == 1:
-                self.refresh_library()
+    # --- THEME & CUSTOM WAVEFORM ---
+    def apply_theme(self, force: bool = False):
+        theme_key = self.settings.get("theme", "auto")
+        sys_dark = is_windows_dark_mode()
+        cfg = load_theme_config(theme_key, sys_dark)
+        dark = bool(cfg.get("base_dark", True))
+
+        wf_pref = self.settings.get("waveform_style", "auto")
+        wf_theme = cfg.get("waveform", {})
+        eff_style = wf_theme.get("style", "radial") if wf_pref == "auto" else wf_pref
+        eff_mirror = (
+            bool(wf_theme.get("mirror", False))
+            if wf_pref == "auto" and not self.settings.get("waveform_mirror", False)
+            else bool(self.settings.get("waveform_mirror", False))
+        )
+        eff_idle_dots = (
+            bool(wf_theme.get("idle_dots", False))
+            if wf_pref == "auto" and not self.settings.get("waveform_idle_dots", False)
+            else bool(self.settings.get("waveform_idle_dots", False))
+        )
+        eff_max_w = int(self.settings.get("waveform_max_width", 620))
+
+        sig = (
+            theme_key,
+            dark,
+            eff_style,
+            eff_mirror,
+            eff_idle_dots,
+            eff_max_w,
+            cfg.get("background", {}).get("image", ""),
+            cfg.get("sidebar", {}).get("image", ""),
+        )
+        if not force and sig == self._last_theme_sig:
+            return
+
+        self._last_theme_sig = sig
+        self._current_theme_cfg = cfg
+        self.last_dark_state = dark
+
+        self.root_widget.set_background_config(cfg.get("background", {}))
+        self.sidebar.set_sidebar_config(cfg.get("sidebar", {}))
+
+        app = QApplication.instance()
+        app.setPalette(build_palette(dark, cfg))
+        app.setStyleSheet(build_stylesheet(dark, self.chevrons, cfg))
+        set_windows_titlebar_theme(int(self.winId()), dark)
+
+        self.pulse_btn.set_dark(dark)
+        self.pulse_btn.configure_waveform(
+            style=eff_style,
+            mirror=eff_mirror,
+            idle_dots=eff_idle_dots,
+            max_width=eff_max_w,
+            color1=wf_theme.get("color1", cfg.get("colors", {}).get("accent", "#3B82F6")),
+            color2=wf_theme.get("color2", cfg.get("colors", {}).get("accent_secondary", "#8B5CF6")),
+            flip_hz=bool(wf_theme.get("flip_hz", False)),
+            hair_ties=bool(wf_theme.get("hair_ties", False)),
+            right_alt_white=bool(wf_theme.get("right_alt_white", False)),
+            teto_bow=bool(wf_theme.get("teto_bow", False)),
+        )
+        self.detail_page.set_theme_dark(dark, theme_cfg=cfg)
+        self.hud.set_theme(dark, cfg)
+        self.song_popup.set_theme(dark, cfg)
+        self._refresh_theme_icons()
+        if self.pages.currentIndex() == 1:
+            self.refresh_library()
 
     # --- NAVIGATION WITH UNSAVED SETTINGS GUARD ---
     def _set_active_nav(self, idx):
@@ -1502,7 +2319,7 @@ class SongPulseWindow(QMainWindow):
             box = QMessageBox(self)
             box.setWindowTitle("Unsaved Settings")
             box.setText("You have unsaved changes in Settings.")
-            box.setInformativeText("Do you want to save them before leaving?")
+            box.setInformativeText("Save them before leaving?")
             btn_save = box.addButton("Save", QMessageBox.ButtonRole.AcceptRole)
             btn_discard = box.addButton("Discard", QMessageBox.ButtonRole.DestructiveRole)
             btn_cancel = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
@@ -1518,11 +2335,15 @@ class SongPulseWindow(QMainWindow):
                 self._discard_unsaved_settings()
 
         self.detail_page.stop_audio()
-
         self._set_active_nav(idx)
         if idx == 1:
+            self._rebuild_playlist_tabs()
             self.refresh_library()
         elif idx == 2:
+            # Always collapse AI Models section when opening Settings
+            self._set_ai_section_expanded(False)
+            self._rebuild_ai_models_ui()
+            self._refresh_storage_summary()
             self._update_gpu_indicator()
 
     # --- RESULT CARD ---
@@ -1534,8 +2355,8 @@ class SongPulseWindow(QMainWindow):
                 w.deleteLater()
 
     def _open_current_result_details(self):
-     if self.current_result_song:
-         self._open_song_details(self.current_result_song)
+        if self.current_result_song:
+            self._open_song_details(self.current_result_song)
 
     def display_song_card(self, song):
         self.current_result_song = song
@@ -1593,50 +2414,414 @@ class SongPulseWindow(QMainWindow):
             btn.setText("Copied!")
             QTimer.singleShot(1400, lambda: btn.setText(orig))
 
-    # --- LIBRARY TAB ---
-    def refresh_library(self):
-        query = self.search_input.text().strip().lower()
-        filtered = [
-            s
-            for s in self.history
-            if not query
-            or query in s.get("title", "").lower()
-            or query in s.get("artist", "").lower()
-            or query in s.get("album", "").lower()
-            or query in s.get("genre", "").lower()
-        ]
-        self.lib_count_lbl.setText(f"({len(filtered)} songs)")
+    # --- LIBRARY REWORK (PLAYLISTS, MANUAL REORDER, SORT, MULTI-SELECT) ---
+    def _get_active_custom_playlist(self):
+        if self.active_playlist_key in ("all", "liked"):
+            return None
+        return next(
+            (p for p in self.playlists if p.get("id") == self.active_playlist_key),
+            None,
+        )
 
-        while self.lib_list_layout.count() > 1:
+    def _rebuild_playlist_tabs(self):
+        self.playlist_tabs_flow.clear()
+        tabs = [("all", "Identified Songs"), ("liked", "Liked Songs")]
+        for pl in self.playlists:
+            tabs.append((pl["id"], pl.get("name", "Playlist")))
+
+        for key, label in tabs:
+            btn = QPushButton(label)
+            btn.setObjectName("PlaylistTab")
+            btn.setProperty("active", key == self.active_playlist_key)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(lambda checked=False, k=key: self._select_playlist_tab(k))
+            self.playlist_tabs_flow.addWidget(btn)
+
+        add_btn = QPushButton("+ New Playlist")
+        add_btn.setObjectName("PlatformBtn")
+        add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        add_btn.clicked.connect(self._create_new_playlist)
+        self.playlist_tabs_flow.addWidget(add_btn)
+        QTimer.singleShot(0, self.playlist_tabs_flow._sync_height)
+
+    def _select_playlist_tab(self, key: str):
+        self.active_playlist_key = key
+        self.selected_song_ids.clear()
+        pl = self._get_active_custom_playlist()
+        is_custom = pl is not None
+        self.pl_rename_btn.setVisible(is_custom)
+        self.pl_del_btn.setVisible(is_custom)
+        self.clear_all_btn.setVisible(key == "all")
+
+        # Default sort mode: Manual Order for custom playlists, Date (Newest) for All/Liked
+        self.lib_sort_combo.blockSignals(True)
+        if is_custom:
+            sort_map = {"manual": 0, "date_desc": 1, "date_asc": 2, "title": 3, "artist": 4, "genre": 5, "album": 6}
+            self.lib_sort_combo.setCurrentIndex(sort_map.get(pl.get("sort_mode", "manual"), 0))
+        elif self.lib_sort_combo.currentIndex() == 0:
+            self.lib_sort_combo.setCurrentIndex(1)
+        self.lib_sort_combo.blockSignals(False)
+
+        self._rebuild_playlist_tabs()
+        self.refresh_library()
+
+    def _create_new_playlist(self) -> dict | None:
+        name, ok = QInputDialog.getText(self, "New Playlist", "Playlist name:")
+        if not ok or not name.strip():
+            return None
+        pl = {
+            "id": hashlib.md5(f"{name}-{time.time()}".encode()).hexdigest()[:10],
+            "name": name.strip(),
+            "song_ids": [],
+            "sort_mode": "manual",
+        }
+        self.playlists.append(pl)
+        save_playlists(self.playlists)
+        self._select_playlist_tab(pl["id"])
+        return pl
+
+    def _rename_active_playlist(self):
+        pl = self._get_active_custom_playlist()
+        if not pl:
+            return
+        name, ok = QInputDialog.getText(
+            self, "Rename Playlist", "New name:", text=pl.get("name", "")
+        )
+        if ok and name.strip():
+            pl["name"] = name.strip()
+            save_playlists(self.playlists)
+            self._rebuild_playlist_tabs()
+
+    def _delete_active_playlist(self):
+        pl = self._get_active_custom_playlist()
+        if not pl:
+            return
+        reply = QMessageBox.question(
+            self,
+            "Delete Playlist",
+            f"Delete playlist '{pl.get('name', '')}'? Songs will remain in Identified Songs.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self.playlists = [p for p in self.playlists if p.get("id") != pl["id"]]
+        save_playlists(self.playlists)
+        self._select_playlist_tab("all")
+
+    def _on_library_sort_changed(self, idx: int):
+        pl = self._get_active_custom_playlist()
+        if pl is not None:
+            modes = ["manual", "date_desc", "date_asc", "title", "artist", "genre", "album"]
+            pl["sort_mode"] = modes[max(0, min(idx, len(modes) - 1))]
+            save_playlists(self.playlists)
+        self.refresh_library()
+
+    def _get_visible_library_songs(self) -> list[dict]:
+        by_id = {s.get("id"): s for s in self.history if s.get("id")}
+        pl = self._get_active_custom_playlist()
+
+        if self.active_playlist_key == "liked":
+            base = [s for s in self.history if s.get("liked")]
+        elif pl is not None:
+            base = [by_id[sid] for sid in pl.get("song_ids", []) if sid in by_id]
+        else:
+            base = list(self.history)
+
+        query = self.search_input.text().strip().lower()
+        if query:
+            base = [
+                s
+                for s in base
+                if query in s.get("title", "").lower()
+                or query in s.get("artist", "").lower()
+                or query in s.get("album", "").lower()
+                or query in s.get("genre", "").lower()
+            ]
+
+        sort_idx = self.lib_sort_combo.currentIndex()
+        if sort_idx == 0:  # Manual Order
+            return base
+        if sort_idx == 1:  # Date (Newest)
+            return base
+        if sort_idx == 2:  # Date (Oldest)
+            return list(reversed(base))
+        if sort_idx == 3:  # Title
+            return sorted(base, key=lambda s: (s.get("title") or "").lower())
+        if sort_idx == 4:  # Artist
+            return sorted(base, key=lambda s: (s.get("artist") or "").lower())
+        if sort_idx == 5:  # Genre
+            return sorted(base, key=lambda s: (s.get("genre") or "zzz").lower())
+        if sort_idx == 6:  # Album
+            return sorted(base, key=lambda s: (s.get("album") or "zzz").lower())
+        return base
+
+    def _update_batch_ui(self):
+        count = len(self.selected_song_ids)
+        self.batch_bar.setVisible(count > 0)
+        self.clear_all_btn.setVisible(count == 0 and self.active_playlist_key == "all")
+        self.selected_count_lbl.setText(f"{count} selected" if count > 0 else "")
+
+        total_visible = len(self._lib_cards)
+        self.select_all_chk.blockSignals(True)
+        self.select_all_chk.setChecked(total_visible > 0 and count == total_visible)
+        self.select_all_chk.blockSignals(False)
+
+    def _on_card_selection_toggled(self, song_id: str, checked: bool):
+        if checked:
+            self.selected_song_ids.add(song_id)
+        else:
+            self.selected_song_ids.discard(song_id)
+        self._update_batch_ui()
+
+    def _on_select_all_toggled(self, state: int):
+        check_all = state == Qt.CheckState.Checked.value
+        self.selected_song_ids.clear()
+        for card in self._lib_cards:
+            card.set_checked_silent(check_all)
+            if check_all:
+                self.selected_song_ids.add(card._song_id)
+        self._update_batch_ui()
+
+    def _toggle_song_liked(self, song_id: str):
+        for s in self.history:
+            if s.get("id") == song_id:
+                s["liked"] = not bool(s.get("liked", False))
+                save_history(self.history)
+                break
+        if self.pages.currentIndex() == 1:
+            self.refresh_library()
+
+    def _move_playlist_song(self, song_id: str, delta: int):
+        pl = self._get_active_custom_playlist()
+        if not pl:
+            return
+        ids = list(pl.get("song_ids", []))
+        if song_id not in ids:
+            return
+        idx = ids.index(song_id)
+        new_idx = max(0, min(len(ids) - 1, idx + delta))
+        if new_idx == idx:
+            return
+        ids.insert(new_idx, ids.pop(idx))
+        pl["song_ids"] = ids
+        save_playlists(self.playlists)
+        self.refresh_library()
+
+    def _drop_reorder_playlist_song(self, dragged_id: str, target_id: str):
+        pl = self._get_active_custom_playlist()
+        if not pl:
+            return
+        ids = list(pl.get("song_ids", []))
+        if dragged_id in ids and target_id in ids:
+            ids.remove(dragged_id)
+            t_idx = ids.index(target_id)
+            ids.insert(t_idx, dragged_id)
+            pl["song_ids"] = ids
+            save_playlists(self.playlists)
+            self.refresh_library()
+
+    def _show_batch_add_playlist_menu(self):
+        if not self.selected_song_ids:
+            return
+        menu = QMenu(self)
+        act_like = QAction("Liked Songs", menu)
+        act_like.triggered.connect(self._add_selected_to_liked)
+        menu.addAction(act_like)
+
+        if self.playlists:
+            menu.addSeparator()
+            for pl in self.playlists:
+                act = QAction(pl.get("name", "Playlist"), menu)
+                act.triggered.connect(
+                    lambda checked=False, pid=pl["id"]: self._add_selected_to_playlist(pid)
+                )
+                menu.addAction(act)
+
+        menu.addSeparator()
+        act_new = QAction("+ Create New Playlist...", menu)
+        act_new.triggered.connect(self._create_playlist_with_selected)
+        menu.addAction(act_new)
+        menu.exec(self.batch_add_pl_btn.mapToGlobal(self.batch_add_pl_btn.rect().bottomLeft()))
+
+    def _add_selected_to_liked(self):
+        for s in self.history:
+            if s.get("id") in self.selected_song_ids:
+                s["liked"] = True
+        save_history(self.history)
+        self.selected_song_ids.clear()
+        self.refresh_library()
+
+    def _add_selected_to_playlist(self, playlist_id: str):
+        pl = next((p for p in self.playlists if p.get("id") == playlist_id), None)
+        if not pl:
+            return
+        ids = list(pl.get("song_ids", []))
+        for s in self.history:
+            sid = s.get("id")
+            if sid in self.selected_song_ids and sid not in ids:
+                ids.append(sid)
+        pl["song_ids"] = ids
+        save_playlists(self.playlists)
+        self.selected_song_ids.clear()
+        self.refresh_library()
+
+    def _create_playlist_with_selected(self):
+        selected_copy = set(self.selected_song_ids)
+        pl = self._create_new_playlist()
+        if pl and selected_copy:
+            pl["song_ids"] = [s["id"] for s in self.history if s.get("id") in selected_copy]
+            save_playlists(self.playlists)
+            self.refresh_library()
+
+    def _clear_selected_songs(self):
+        if not self.selected_song_ids:
+            return
+        n = len(self.selected_song_ids)
+        pl = self._get_active_custom_playlist()
+        if pl is not None:
+            pl["song_ids"] = [sid for sid in pl.get("song_ids", []) if sid not in self.selected_song_ids]
+            save_playlists(self.playlists)
+            self.selected_song_ids.clear()
+            self.refresh_library()
+            return
+
+        if self.active_playlist_key == "liked":
+            for s in self.history:
+                if s.get("id") in self.selected_song_ids:
+                    s["liked"] = False
+            save_history(self.history)
+            self.selected_song_ids.clear()
+            self.refresh_library()
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Clear Selected Songs",
+            f"Remove {n} selected song(s) from your library?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self.history = [s for s in self.history if s.get("id") not in self.selected_song_ids]
+        for p in self.playlists:
+            p["song_ids"] = [sid for sid in p.get("song_ids", []) if sid not in self.selected_song_ids]
+        save_history(self.history)
+        save_playlists(self.playlists)
+        self.selected_song_ids.clear()
+        self.refresh_library()
+
+    def _batch_download_selected(self):
+        if not self.selected_song_ids:
+            return
+        exe_path = (self.settings.get("ytdlp_app_path") or "").strip()
+        if not exe_path or not os.path.exists(exe_path):
+            detected = find_default_ytdlp_app()
+            if detected:
+                exe_path = detected
+                self._on_ytdlp_path_picked(exe_path)
+            else:
+                chosen = prompt_install_or_locate_ytdlp(self)
+                if not chosen:
+                    return
+                exe_path = chosen
+                self._on_ytdlp_path_picked(exe_path)
+
+        songs = [s for s in self.history if s.get("id") in self.selected_song_ids]
+        urls = []
+        for s in songs:
+            u = s.get("youtube_video_url") or ""
+            if not u:
+                u = resolve_youtube_watch_url(s.get("artist", ""), s.get("title", ""))
+                if u:
+                    s["youtube_video_url"] = u
+            if u or s.get("youtube_url"):
+                urls.append(u or s["youtube_url"])
+        save_history(self.history)
+
+        if not urls:
+            QMessageBox.warning(self, "No Links", "Could not resolve YouTube links for selected songs.")
+            return
+
+        joined = "\n".join(urls)
+        QApplication.clipboard().setText(joined)
+        try:
+            _launch_and_autopaste_ytdlp(exe_path, urls[0])
+            self.hud.show_message(
+                f"Copied {len(urls)} YouTube link(s) for yt-dlp Downloader",
+                dark=bool(self.last_dark_state),
+                dot_color="#22C55E",
+                auto_hide_ms=3200,
+            )
+        except Exception as e:
+            QMessageBox.warning(self, "Launch Failed", f"Could not open yt-dlp Downloader:\n{e}")
+
+    def refresh_library(self):
+        filtered = self._get_visible_library_songs()
+        self.lib_count_lbl.setText(f"({len(filtered)})")
+
+        while self.lib_list_layout.count():
             item = self.lib_list_layout.takeAt(0)
-            if item.widget():
+            if item and item.widget():
                 item.widget().deleteLater()
+        self._lib_cards.clear()
+
+        visible_ids = {s.get("id") for s in filtered}
+        self.selected_song_ids &= visible_ids
 
         if not filtered:
             hk = self.settings.get("hotkey", "ctrl+alt+s").upper()
-            empty = QLabel(f"No saved songs yet. Press {hk} when you hear a song!")
+            if self.active_playlist_key == "liked":
+                msg = "No liked songs yet. Click ♡ on any song to add it here."
+            elif self._get_active_custom_playlist() is not None:
+                msg = "This playlist is empty. Select songs in Identified Songs and click Add to Playlist."
+            else:
+                msg = f"No saved songs yet. Press {hk} when you hear a song!"
+            empty = QLabel(msg)
             empty.setObjectName("Muted")
             empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
             empty.setStyleSheet("padding: 40px; font-size: 13px;")
-            self.lib_list_layout.insertWidget(0, empty)
+            self.lib_list_layout.addWidget(empty)
+            self._update_batch_ui()
             return
 
+        pl = self._get_active_custom_playlist()
+        allow_reorder = pl is not None and self.lib_sort_combo.currentIndex() == 0
+        del_tip = (
+            "Remove from playlist"
+            if pl is not None
+            else ("Remove from Liked Songs" if self.active_playlist_key == "liked" else "Remove from library")
+        )
         details_icon = getattr(self, "details_ui_icon", create_ui_icon("details", "#D4D4D8", 13))
-        for idx, song in enumerate(filtered):
+
+        for song in filtered:
+            sid = song.get("id", "")
             card = HistoryRowCard(
                 song,
                 self.p_icons,
                 details_icon,
                 on_details=self._open_song_details,
                 on_delete=self.delete_history_item,
+                checked=sid in self.selected_song_ids,
+                allow_reorder=allow_reorder,
+                delete_tooltip=del_tip,
             )
-            self.lib_list_layout.insertWidget(idx, card)
+            card.selection_toggled.connect(self._on_card_selection_toggled)
+            card.like_toggled.connect(self._toggle_song_liked)
+            if allow_reorder:
+                card.move_requested.connect(self._move_playlist_song)
+                card.drop_reorder.connect(self._drop_reorder_playlist_song)
+            self.lib_list_layout.addWidget(card)
+            self._lib_cards.append(card)
+
+        self._update_batch_ui()
 
     def _open_song_details(self, song):
-        self.detail_page.load_song(song, dark=bool(self.last_dark_state))
+        self.detail_page.load_song(
+            song, dark=bool(self.last_dark_state), theme_cfg=self._current_theme_cfg
+        )
         self.pages.setCurrentIndex(3)
         for i, btn in enumerate(self.nav_buttons):
-            btn.setProperty("active", i == 1)  # Keep Library tab highlighted
+            btn.setProperty("active", i == 1)
             btn.style().unpolish(btn)
             btn.style().polish(btn)
         self._refresh_theme_icons()
@@ -1649,8 +2834,24 @@ class SongPulseWindow(QMainWindow):
                 break
 
     def delete_history_item(self, song_id):
+        pl = self._get_active_custom_playlist()
+        if pl is not None:
+            pl["song_ids"] = [sid for sid in pl.get("song_ids", []) if sid != song_id]
+            save_playlists(self.playlists)
+            self.refresh_library()
+            return
+        if self.active_playlist_key == "liked":
+            for s in self.history:
+                if s.get("id") == song_id:
+                    s["liked"] = False
+            save_history(self.history)
+            self.refresh_library()
+            return
         self.history = [s for s in self.history if s.get("id") != song_id]
+        for p in self.playlists:
+            p["song_ids"] = [sid for sid in p.get("song_ids", []) if sid != song_id]
         save_history(self.history)
+        save_playlists(self.playlists)
         self.refresh_library()
 
     def clear_history(self):
@@ -1664,23 +2865,22 @@ class SongPulseWindow(QMainWindow):
         )
         if reply == QMessageBox.StandardButton.Yes:
             self.history = []
+            self.selected_song_ids.clear()
             save_history(self.history)
             self.refresh_library()
 
     # --- IDENTIFICATION WORKFLOW ---
-    def _on_model_loaded(self, cuda_ok):
-        mode = "GPU" if cuda_ok else "CPU"
-        self.model_dot.setStyleSheet("color: #22C55E; font-size: 10px;")
-        self.model_status_lbl.setText(f"AI Ready ({mode})")
-        self.ai_foot_widget.setToolTip(f"AI Cleanup Ready ({mode})")
+    def _on_model_loaded(self, cuda_ok, model_name=""):
+        self._refresh_ai_footer_status()
         self._update_gpu_indicator()
 
     def _on_model_failed(self, err):
         self.model_dot.setStyleSheet("color: #EF4444; font-size: 10px;")
         self.model_status_lbl.setText("AI unavailable")
-        self.ai_foot_widget.setToolTip(f"AI Cleanup unavailable:\n{err}")
+        self.ai_foot_widget.setToolTip(f"AI Rescue unavailable:\n{err}")
         try:
             from .config import DATA_DIR
+
             with open(os.path.join(DATA_DIR, "ai_error.log"), "w", encoding="utf-8") as f:
                 f.write(str(err))
         except Exception:
@@ -1688,7 +2888,30 @@ class SongPulseWindow(QMainWindow):
 
     def _on_quick_ai_toggled(self, state):
         enabled = state == Qt.CheckState.Checked.value
+        if enabled:
+            active = self.settings.get("ai_model", UVR_MODEL_NAME)
+            ready = [m for m in get_downloaded_ai_models() if is_model_ready(m)]
+            if not is_model_ready(active) and not ready:
+                self._disable_ai_checkbox_cleanly()
+                box = QMessageBox(self)
+                box.setWindowTitle("AI Rescue Model Not Ready")
+                box.setIcon(QMessageBox.Icon.Information)
+                box.setText("No local AI rescue model is downloaded yet.")
+                box.setInformativeText(
+                    "Download a model (De-Reverb, De-Noise, Crowd, or Whisper Lyrics) in Settings -> AI Models."
+                )
+                open_btn = box.addButton("Open AI Settings", QMessageBox.ButtonRole.AcceptRole)
+                box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+                box.exec()
+                if box.clickedButton() == open_btn:
+                    self.switch_page(2)
+                    self._set_ai_section_expanded(True)
+                return
+            if not is_model_ready(active) and ready:
+                self._on_select_ai_model(ready[0])
+
         self.settings["use_ai_separation"] = enabled
+        self._saved_settings_snapshot["use_ai_separation"] = enabled
         self.ai_warn_banner.setVisible(enabled)
         save_settings(self.settings)
 
@@ -1709,11 +2932,15 @@ class SongPulseWindow(QMainWindow):
 
     def _on_hotkey_triggered(self):
         mode = self.settings.get("hotkey_mode", "live")
+        if mode == "buffer" and not self.settings.get("enable_audio_buffer", True):
+            mode = "live"
         self.trigger_identify(mode=mode, from_hotkey=True)
 
     def trigger_identify(self, mode="live", from_hotkey=False):
         if self.is_processing:
             return
+        if mode == "buffer" and not self.settings.get("enable_audio_buffer", True):
+            mode = "live"
         if not self.engine.monitored_names:
             msg = "No audio output selected. Pick an output in Settings."
             self.live_status_lbl.setText(msg)
@@ -1734,7 +2961,11 @@ class SongPulseWindow(QMainWindow):
         self.quick_ai_chk.setEnabled(False)
         self.cancel_btn.show()
 
-        if from_hotkey or not self.isVisible():
+        if (
+            self.settings.get("always_show_status_hud", True)
+            or from_hotkey
+            or not self.isVisible()
+        ):
             label = "SongPulse • Listening live..." if mode == "live" else "SongPulse • Scanning audio..."
             self.hud.show_message(label, dark=bool(self.last_dark_state), dot_color="#3B82F6")
 
@@ -1753,12 +2984,14 @@ class SongPulseWindow(QMainWindow):
         if not self.is_processing:
             return
         self.cancel_evt.set()
+        if self.worker is not None and hasattr(self.worker, "request_cancel"):
+            self.worker.request_cancel()
         self.cancel_btn.setEnabled(False)
         self.live_status_lbl.setText("Cancelling...")
 
     def _on_worker_status(self, text):
         self.live_status_lbl.setText(text)
-        if self.hud.isVisible():
+        if self.hud.isVisible() or self.settings.get("always_show_status_hud", True):
             self.hud.show_message(text, dark=bool(self.last_dark_state), dot_color="#3B82F6")
 
     def _on_song_found(self, song):
@@ -1766,7 +2999,7 @@ class SongPulseWindow(QMainWindow):
         self.history.insert(0, song)
         save_history(self.history)
         self.display_song_card(song)
-        self.live_status_lbl.setText(f"Found: {song['artist']} — {song['title']}")
+        self.live_status_lbl.setText(f"Found: {song['artist']} - {song['title']}")
 
         if self.settings.get("auto_copy", False):
             QApplication.clipboard().setText(f"{song['artist']} - {song['title']}")
@@ -1778,11 +3011,18 @@ class SongPulseWindow(QMainWindow):
             if self.settings.get("force_overlay_notification", True):
                 self.song_popup.show_song(song, dark=bool(self.last_dark_state))
             else:
-                sub = f"{song['artist']} — {song['title']}"
+                sub = f"{song['artist']} - {song['title']}"
                 if song.get("released"):
                     sub += f" ({song['released']})"
                 icon_path = song.get("cover_path") or ICON_CACHE_FILE
-                self._toast("Song Found!", sub, song.get("shazam_url"), icon_path=icon_path)
+                app_launch = f"songpulse://song/{song.get('id', '')}" if song.get("id") else ""
+                self._toast(
+                    "Song Found!",
+                    sub,
+                    launch_url=app_launch,
+                    browser_url=song.get("shazam_url"),
+                    icon_path=icon_path,
+                )
 
         if self.pages.currentIndex() == 1:
             self.refresh_library()
@@ -1791,7 +3031,11 @@ class SongPulseWindow(QMainWindow):
 
     def _on_no_match(self):
         self.live_status_lbl.setText("No match found. Try again during a clearer part of the song.")
-        if self.hud.isVisible() or not self.isVisible():
+        if (
+            self.hud.isVisible()
+            or self.settings.get("always_show_status_hud", True)
+            or not self.isVisible()
+        ):
             self.hud.show_message(
                 "SongPulse • No match found",
                 dark=bool(self.last_dark_state),
@@ -1805,7 +3049,11 @@ class SongPulseWindow(QMainWindow):
 
     def _on_error(self, msg):
         self.live_status_lbl.setText(f"Error: {msg}")
-        if self.hud.isVisible() or not self.isVisible():
+        if (
+            self.hud.isVisible()
+            or self.settings.get("always_show_status_hud", True)
+            or not self.isVisible()
+        ):
             self.hud.show_message(
                 f"SongPulse • {msg}",
                 dark=bool(self.last_dark_state),
@@ -1823,19 +3071,23 @@ class SongPulseWindow(QMainWindow):
         self.quick_ai_chk.setEnabled(True)
         self._refresh_identify_header()
 
-    def _toast(self, title, msg, launch_url=None, icon_path=None):
+    def _toast(self, title, msg, launch_url=None, browser_url=None, icon_path=None):
         try:
             kwargs = {
                 "app_id": APP_NAME,
                 "title": title,
                 "msg": msg,
-                "duration": "long",  # ~12-25s Windows toast fallback
+                "duration": "long",
             }
+            if launch_url:
+                kwargs["launch"] = launch_url
             if icon_path and os.path.exists(icon_path):
                 kwargs["icon"] = os.path.abspath(icon_path)
             toast = Notification(**kwargs)
             if launch_url:
-                toast.add_actions(label="Open in Browser", launch=launch_url)
+                toast.add_actions(label="View in SongPulse", launch=launch_url)
+            if browser_url:
+                toast.add_actions(label="Open in Browser", launch=browser_url)
             toast.show()
         except Exception:
             pass

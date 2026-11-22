@@ -1,40 +1,24 @@
 import ctypes
+import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
+import urllib.parse
 import winreg
 import winsound
 
 import numpy as np
 import soundfile as sf
 
-# Register CUDA runtime directory & preload ONNX DLLs before audio_separator imports onnxruntime
-for _cuda_ver in ("v13.5", "v13.4", "v13.3", "v13.2", "v13.1", "v13.0", "v12.8", "v12.6"):
-    _cuda_x64 = rf"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\{_cuda_ver}\bin\x64"
-    _cuda_bin = rf"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\{_cuda_ver}\bin"
-    for _p in (_cuda_x64, _cuda_bin):
-        if os.path.isdir(_p):
-            try:
-                os.add_dll_directory(_p)
-            except Exception:
-                pass
-            if _p not in os.environ.get("PATH", ""):
-                os.environ["PATH"] = _p + os.pathsep + os.environ.get("PATH", "")
-
-try:
-    import onnxruntime as ort
-    if hasattr(ort, "preload_dlls"):
-        ort.preload_dlls()
-except Exception:
-    ort = None
-
 # --- APP METADATA & PATHS ---
 APP_NAME = "SongPulse"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 APP_USER_MODEL_ID = f"Greatly07.SongPulse.{APP_VERSION}"
 GITHUB_REPO = "Greatly07/songpulse"
+YTDLP_GITHUB_REPO = "Greatly07/yt-dlp-downloader"
 
 IS_FROZEN = getattr(sys, "frozen", False)
 if IS_FROZEN:
@@ -50,36 +34,206 @@ COVERS_DIR = os.path.join(DATA_DIR, "covers")
 TEMP_DIR = os.path.join(DATA_DIR, "temp")
 MODELS_DIR = os.path.join(DATA_DIR, "models")
 ICONS_DIR = os.path.join(DATA_DIR, "ui_icons")
+THEMES_DIR = os.path.join(DATA_DIR, "themes")
+AI_RUNTIME_DIR = os.path.join(DATA_DIR, "ai_runtime")
+TOOLS_DIR = os.path.join(DATA_DIR, "tools")
 HISTORY_FILE = os.path.join(DATA_DIR, "history.json")
+PLAYLISTS_FILE = os.path.join(DATA_DIR, "playlists.json")
 SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
 ICON_CACHE_FILE = os.path.join(DATA_DIR, "songpulse.ico")
 PING_SOUND_FILE = os.path.join(DATA_DIR, "ping.wav")
 SINGLE_INSTANCE_KEY = "SongPulse_SingleInstance_LocalServer_v1"
 
-for _d in (DATA_DIR, COVERS_DIR, TEMP_DIR, MODELS_DIR, ICONS_DIR):
+for _d in (DATA_DIR, COVERS_DIR, TEMP_DIR, MODELS_DIR, ICONS_DIR, THEMES_DIR):
     os.makedirs(_d, exist_ok=True)
 
+
+def setup_runtime_paths():
+    """Registers optional AI runtime, bundled tools/ffmpeg, and CUDA DLL paths cleanly."""
+    if os.path.isdir(AI_RUNTIME_DIR) and AI_RUNTIME_DIR not in sys.path:
+        sys.path.insert(0, AI_RUNTIME_DIR)
+
+    dll_candidates = [
+        os.path.join(APP_DIR, "bin"),
+        os.path.join(APP_DIR, "_internal", "bin"),
+        os.path.join(AI_RUNTIME_DIR, "bin"),
+        os.path.join(AI_RUNTIME_DIR, "torch", "lib"),
+        os.path.join(AI_RUNTIME_DIR, "onnxruntime", "capi"),
+        os.path.join(TOOLS_DIR, "bin"),
+        TOOLS_DIR,
+    ]
+
+    for base in (
+        os.path.join(APP_DIR, "_internal", "nvidia"),
+        os.path.join(AI_RUNTIME_DIR, "nvidia"),
+    ):
+        if os.path.isdir(base):
+            try:
+                for entry in os.scandir(base):
+                    if entry.is_dir():
+                        bdir = os.path.join(entry.path, "bin")
+                        if os.path.isdir(bdir):
+                            dll_candidates.append(bdir)
+            except OSError:
+                pass
+
+    for _cuda_ver in ("v13.5", "v13.4", "v13.3", "v13.2", "v13.1", "v13.0", "v12.8", "v12.6"):
+        dll_candidates.append(
+            rf"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\{_cuda_ver}\bin\x64"
+        )
+        dll_candidates.append(
+            rf"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\{_cuda_ver}\bin"
+        )
+
+    cur_path = os.environ.get("PATH", "")
+    for p in dll_candidates:
+        if os.path.isdir(p):
+            try:
+                os.add_dll_directory(p)
+            except Exception:
+                pass
+            if p not in cur_path:
+                cur_path = p + os.pathsep + cur_path
+    os.environ["PATH"] = cur_path
+
+
+setup_runtime_paths()
+
+ort = None
+
+
+def _try_load_ort():
+    global ort
+    if ort is not None:
+        return ort
+    try:
+        import onnxruntime as _ort
+
+        if hasattr(_ort, "preload_dlls"):
+            _ort.preload_dlls()
+        ort = _ort
+    except Exception:
+        ort = None
+    return ort
+
+
+_try_load_ort()
+
 SAMPLE_RATE = 44100
-CHUNK_FRAMES = 4410  # 0.1s audio chunks
-UVR_MODEL_NAME = "UVR-MDX-NET-Inst_HQ_3.onnx"
+CHUNK_FRAMES = 1470  # ~33ms chunks (30 Hz waveform updates)
+UVR_MODEL_NAME = "Reverb_HQ_By_FoxJoy.onnx"
+
+_UVR_PUBLIC_BASE = (
+    "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models"
+)
+
+# Curated tricky-track rescue models (De-Reverb, De-Noise/SFX, Crowd, Lyrics Whisper & Speech Stripper)
+AI_MODEL_CATALOG = [
+    {
+        "filename": "Reverb_HQ_By_FoxJoy.onnx",
+        "name": "De-Reverb HQ (FoxJoy)",
+        "tag": "Recommended",
+        "description": "Strips heavy reverb and room echo while keeping vocals and music intact. Great for slowed+reverb edits.",
+        "size_mb": 66,
+        "type": "MDX",
+        "url": f"{_UVR_PUBLIC_BASE}/Reverb_HQ_By_FoxJoy.onnx",
+    },
+    {
+        "filename": "UVR-DeEcho-DeReverb.pth",
+        "name": "UVR De-Echo & De-Reverb",
+        "tag": "Light De-Reverb",
+        "description": "Compact VR model that cleans echo and reverb quickly on both GPU and CPU.",
+        "size_mb": 35,
+        "type": "VR",
+        "url": f"{_UVR_PUBLIC_BASE}/UVR-DeEcho-DeReverb.pth",
+    },
+    {
+        "filename": "UVR-DeNoise.pth",
+        "name": "UVR DeNoise (SFX & Static)",
+        "tag": "Noise & SFX",
+        "description": "Removes ambient noise, static, and game sound effects while preserving the song.",
+        "size_mb": 35,
+        "type": "VR",
+        "url": f"{_UVR_PUBLIC_BASE}/UVR-DeNoise.pth",
+    },
+    {
+        "filename": "UVR-MDX-NET_Crowd_HQ_1.onnx",
+        "name": "UVR Crowd & Chatter Remover",
+        "tag": "Live / Streams",
+        "description": "Isolates music from crowd noise and background chatter in live clips or streams.",
+        "size_mb": 66,
+        "type": "MDX",
+        "url": f"{_UVR_PUBLIC_BASE}/UVR-MDX-NET_Crowd_HQ_1.onnx",
+    },
+    {
+        "filename": "whisper:tiny",
+        "name": "Whisper Lyrics Rescue (Tiny)",
+        "tag": "Sped-Up / Covers",
+        "description": "Transcribes sung lyrics locally and searches lyrics databases. Catches nightcore, slowed+reverb, and covers.",
+        "size_mb": 75,
+        "type": "WHISPER",
+        "url": "",
+    },
+    {
+        "filename": "whisper:base",
+        "name": "Whisper Lyrics Rescue (Base)",
+        "tag": "Lyrics Accurate",
+        "description": "Higher accuracy local lyrics transcription for distorted, pitched, or live singing.",
+        "size_mb": 145,
+        "type": "WHISPER",
+        "url": "",
+    },
+    {
+        "filename": "UVR-MDX-NET-Inst_HQ_3.onnx",
+        "name": "UVR Inst HQ 3 (Speech Stripper)",
+        "tag": "Heavy Talking",
+        "description": "Strips loud spoken voices and Discord commentary to expose background instrumentals.",
+        "size_mb": 66,
+        "type": "MDX",
+        "url": f"{_UVR_PUBLIC_BASE}/UVR-MDX-NET-Inst_HQ_3.onnx",
+    },
+]
+
+AI_MODEL_EXTENSIONS = (".onnx", ".pth", ".ckpt")
+
+PREFERRED_INFO_SITES = [
+    ("auto", "Auto (Default)"),
+    ("youtube", "YouTube"),
+    ("yt_music", "YouTube Music"),
+    ("spotify", "Spotify"),
+    ("apple", "Apple Music"),
+    ("shazam", "Shazam"),
+    ("soundcloud", "SoundCloud"),
+    ("deezer", "Deezer"),
+]
 
 DEFAULT_SETTINGS = {
-    "theme": "auto",  # "auto", "dark", "light"
+    "theme": "auto",  # "auto", "dark", "light", "miku", "teto", or "custom:<id>"
+    "waveform_style": "auto",  # "auto", "radial", "horizontal", "pulse_line", "bar", "dots"
+    "waveform_mirror": False,
+    "waveform_idle_dots": False,
+    "waveform_max_width": 620,
+    "preferred_info_site": "auto",
     "hotkey": "ctrl+alt+s",
     "hotkey_mode": "live",  # "buffer" or "live"
+    "enable_audio_buffer": True,
     "buffer_seconds": 12,
     "live_max_seconds": 20,
     "use_ai_separation": False,
+    "ai_model": UVR_MODEL_NAME,
+    "custom_ai_models": [],
     "minimize_to_tray": True,
+    "start_minimized_to_tray": False,
     "save_window_size": True,
-    "window_width": 900,
-    "window_height": 650,
+    "window_width": 920,
+    "window_height": 660,
     "always_on_top": False,
     "show_notifications": True,
+    "always_show_status_hud": True,
     "force_overlay_notification": True,
     "play_ping_sound": True,
     "auto_copy": False,
-    "monitor_all_devices": True,  # Distinct from empty target_devices (= 0 selected)
+    "monitor_all_devices": True,
     "target_devices": [],
     "gpu_auto_cpu": True,
     "gpu_threshold": 65,
@@ -97,10 +251,16 @@ def load_settings():
                     if "live_seconds" in loaded and "live_max_seconds" not in loaded:
                         loaded["live_max_seconds"] = max(12, int(loaded["live_seconds"]))
                     if "monitor_all_devices" not in loaded:
-                        loaded["monitor_all_devices"] = len(loaded.get("target_devices", [])) == 0
+                        loaded["monitor_all_devices"] = (
+                            len(loaded.get("target_devices", [])) == 0
+                        )
                     data.update(loaded)
         except Exception:
             pass
+    if data.get("use_ai_separation") and not is_model_ready(
+        data.get("ai_model", UVR_MODEL_NAME)
+    ):
+        data["use_ai_separation"] = False
     return data
 
 
@@ -129,6 +289,391 @@ def save_history(items):
             json.dump(items, f, indent=2, ensure_ascii=False)
     except Exception:
         pass
+
+
+def load_playlists() -> list[dict]:
+    if os.path.exists(PLAYLISTS_FILE):
+        try:
+            with open(PLAYLISTS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return data
+        except Exception:
+            pass
+    return []
+
+
+def save_playlists(playlists: list[dict]):
+    try:
+        with open(PLAYLISTS_FILE, "w", encoding="utf-8") as f:
+            json.dump(playlists, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def is_whisper_model_id(model_id: str) -> bool:
+    return bool(model_id and str(model_id).startswith("whisper:"))
+
+
+def get_whisper_model_dir(model_id: str) -> str:
+    size = str(model_id).split(":", 1)[1].strip() if ":" in str(model_id) else "tiny"
+    return os.path.join(MODELS_DIR, f"whisper-{size}")
+
+
+def is_whisper_engine_installed() -> bool:
+    setup_runtime_paths()
+    try:
+        return importlib.util.find_spec("faster_whisper") is not None
+    except Exception:
+        return False
+
+
+def is_ai_engine_installed() -> bool:
+    """Checks whether audio_separator or faster_whisper is available."""
+    setup_runtime_paths()
+    try:
+        return (
+            importlib.util.find_spec("audio_separator") is not None
+            or importlib.util.find_spec("faster_whisper") is not None
+        )
+    except Exception:
+        return False
+
+
+def is_uvr_engine_installed() -> bool:
+    setup_runtime_paths()
+    try:
+        return importlib.util.find_spec("audio_separator") is not None
+    except Exception:
+        return False
+
+
+def get_model_file_path(filename: str) -> str:
+    if not filename:
+        return ""
+    if is_whisper_model_id(filename):
+        return get_whisper_model_dir(filename)
+    if os.path.isabs(filename) and os.path.isfile(filename):
+        return filename
+    return os.path.join(MODELS_DIR, os.path.basename(filename))
+
+
+def is_model_downloaded(filename: str) -> bool:
+    if not filename:
+        return False
+    if is_whisper_model_id(filename):
+        wdir = get_whisper_model_dir(filename)
+        if not os.path.isdir(wdir):
+            return False
+        for _r, _d, files in os.walk(wdir):
+            if "model.bin" in files:
+                return True
+        return False
+    p = get_model_file_path(filename)
+    return bool(p and os.path.isfile(p) and os.path.getsize(p) > 1024 * 100)
+
+
+def is_model_ready(filename: str) -> bool:
+    if not is_model_downloaded(filename):
+        return False
+    if is_whisper_model_id(filename):
+        return is_whisper_engine_installed()
+    return is_uvr_engine_installed()
+
+
+def get_downloaded_ai_models() -> list[str]:
+    if not os.path.isdir(MODELS_DIR):
+        return []
+    found = []
+    try:
+        for entry in os.scandir(MODELS_DIR):
+            if entry.is_file() and entry.name.lower().endswith(AI_MODEL_EXTENSIONS):
+                if entry.stat().st_size > 1024 * 100:
+                    found.append(entry.name)
+            elif entry.is_dir() and entry.name.startswith("whisper-"):
+                size = entry.name.split("whisper-", 1)[1]
+                wid = f"whisper:{size}"
+                if is_model_downloaded(wid):
+                    found.append(wid)
+    except OSError:
+        pass
+    return sorted(found)
+
+
+def format_bytes(num_bytes: int) -> str:
+    val = float(max(0, num_bytes))
+    for unit in ("B", "KB", "MB", "GB"):
+        if val < 1024.0 or unit == "GB":
+            return f"{val:.1f} {unit}" if unit != "B" else f"{int(val)} B"
+        val /= 1024.0
+    return f"{val:.1f} GB"
+
+
+def _dir_size(path: str) -> int:
+    total = 0
+    if not os.path.isdir(path):
+        return 0
+    for root, _dirs, files in os.walk(path):
+        for fname in files:
+            try:
+                total += os.path.getsize(os.path.join(root, fname))
+            except OSError:
+                pass
+    return total
+
+
+def get_storage_breakdown(history: list | None = None) -> dict:
+    """Calculates disk usage for each cleanable category in DATA_DIR."""
+    used_covers = set()
+    for song in (history or []):
+        cp = song.get("cover_path") or ""
+        if cp:
+            used_covers.add(os.path.basename(cp))
+
+    temp_files = []
+    temp_bytes = 0
+    if os.path.isdir(TEMP_DIR):
+        for root, _d, files in os.walk(TEMP_DIR):
+            for f in files:
+                fp = os.path.join(root, f)
+                try:
+                    sz = os.path.getsize(fp)
+                    temp_bytes += sz
+                    temp_files.append(fp)
+                except OSError:
+                    pass
+
+    log_files = []
+    log_bytes = 0
+    if os.path.isdir(DATA_DIR):
+        for entry in os.scandir(DATA_DIR):
+            if entry.is_file() and entry.name.lower().endswith(".log"):
+                try:
+                    sz = entry.stat().st_size
+                    log_bytes += sz
+                    log_files.append(entry.path)
+                except OSError:
+                    pass
+
+    unused_cover_files = []
+    unused_cover_bytes = 0
+    all_cover_files = []
+    all_cover_bytes = 0
+    if os.path.isdir(COVERS_DIR):
+        for entry in os.scandir(COVERS_DIR):
+            if entry.is_file():
+                try:
+                    sz = entry.stat().st_size
+                    all_cover_bytes += sz
+                    all_cover_files.append(entry.path)
+                    if entry.name not in used_covers:
+                        unused_cover_bytes += sz
+                        unused_cover_files.append(entry.path)
+                except OSError:
+                    pass
+
+    models = []
+    model_meta_files = []
+    model_meta_bytes = 0
+    if os.path.isdir(MODELS_DIR):
+        for entry in os.scandir(MODELS_DIR):
+            if entry.is_file():
+                try:
+                    sz = entry.stat().st_size
+                except OSError:
+                    continue
+                if entry.name.lower().endswith(AI_MODEL_EXTENSIONS):
+                    models.append(
+                        {"filename": entry.name, "path": entry.path, "bytes": sz, "is_dir": False}
+                    )
+                elif entry.name.lower().endswith((".json", ".yaml", ".yml")):
+                    model_meta_bytes += sz
+                    model_meta_files.append(entry.path)
+            elif entry.is_dir() and entry.name.startswith("whisper-"):
+                sz = _dir_size(entry.path)
+                if sz > 0:
+                    size_tag = entry.name.split("whisper-", 1)[1]
+                    models.append(
+                        {
+                            "filename": f"whisper:{size_tag}",
+                            "path": entry.path,
+                            "bytes": sz,
+                            "is_dir": True,
+                        }
+                    )
+    models.sort(key=lambda m: m["bytes"], reverse=True)
+
+    ai_runtime_bytes = _dir_size(AI_RUNTIME_DIR) if os.path.isdir(AI_RUNTIME_DIR) else 0
+    history_bytes = os.path.getsize(HISTORY_FILE) if os.path.isfile(HISTORY_FILE) else 0
+
+    total_bytes = (
+        temp_bytes
+        + log_bytes
+        + all_cover_bytes
+        + sum(m["bytes"] for m in models)
+        + model_meta_bytes
+        + ai_runtime_bytes
+        + history_bytes
+    )
+
+    return {
+        "temp_files": temp_files,
+        "temp_bytes": temp_bytes,
+        "log_files": log_files,
+        "log_bytes": log_bytes,
+        "unused_cover_files": unused_cover_files,
+        "unused_cover_bytes": unused_cover_bytes,
+        "all_cover_files": all_cover_files,
+        "all_cover_bytes": all_cover_bytes,
+        "models": models,
+        "model_meta_files": model_meta_files,
+        "model_meta_bytes": model_meta_bytes,
+        "ai_runtime_bytes": ai_runtime_bytes,
+        "ai_runtime_dir": AI_RUNTIME_DIR,
+        "history_bytes": history_bytes,
+        "total_bytes": total_bytes,
+    }
+
+
+def build_site_url(kind: str, query: str, site: str = "auto", default_url: str = "") -> str:
+    """Builds an artist or album URL targeting the user's preferred music platform."""
+    q = urllib.parse.quote_plus((query or "").strip())
+    site = (site or "auto").lower().strip()
+    if site == "auto" and default_url:
+        return default_url
+    if not q:
+        return default_url
+    if site == "youtube":
+        return f"https://www.youtube.com/results?search_query={q}"
+    if site == "yt_music":
+        return f"https://music.youtube.com/search?q={q}"
+    if site == "spotify":
+        return f"https://open.spotify.com/search/{q}"
+    if site == "apple":
+        return f"https://music.apple.com/search?term={q}"
+    if site == "shazam":
+        return f"https://www.shazam.com/search/{q}"
+    if site == "soundcloud":
+        return f"https://soundcloud.com/search?q={q}"
+    if site == "deezer":
+        return f"https://www.deezer.com/search/{q}"
+    return default_url or f"https://music.youtube.com/search?q={q}"
+
+
+_PRESERVE_AMP_ARTISTS = {
+    "simon & garfunkel",
+    "above & beyond",
+    "hall & oates",
+    "daryl hall & john oates",
+    "earth, wind & fire",
+    "florence & the machine",
+    "mumford & sons",
+    "of monsters & men",
+    "tegan & sara",
+    "chase & status",
+    "brooks & dunn",
+    "ike & tina turner",
+    "kool & the gang",
+    "sly & the family stone",
+    "tom petty & the heartbreakers",
+    "bob marley & the wailers",
+    "huey lewis & the news",
+    "nico & vinz",
+    "dan + shay",
+    "florence + the machine",
+    "belle & sebastian",
+    "iron & wine",
+    "she & him",
+    "angus & julia stone",
+    "sunshine & whiskey",
+    "crosby, stills & nash",
+    "crosby, stills, nash & young",
+    "peter, paul & mary",
+}
+
+_ARTIST_SPLIT_RE = re.compile(
+    r"\s*(?:,\s*&\s*|,\s+|\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+|\s+with\s+|\s+[x×]\s+|\s*/\s*|\s*;\s*)",
+    re.IGNORECASE,
+)
+
+
+def split_artists(artist_str: str, shazam_artists: list | None = None) -> list[dict]:
+    """Splits a multi-artist credit string into individual artist entries with individual URLs."""
+    raw = (artist_str or "").strip()
+    if not raw:
+        return []
+
+    adam_by_alias = {}
+    ordered_adamids = []
+    for a in (shazam_artists or []):
+        if isinstance(a, dict) and a.get("adamid"):
+            ordered_adamids.append(str(a["adamid"]))
+            alias = (a.get("alias") or "").lower().replace("-", " ").strip()
+            if alias:
+                adam_by_alias[alias] = str(a["adamid"])
+
+    if raw.lower() in _PRESERVE_AMP_ARTISTS:
+        names = [raw]
+    else:
+        cleaned = re.sub(
+            r"[\(\[]\s*(?:feat\.?|ft\.?|featuring|with)\s+([^\)\]]+)[\)\]]",
+            r", \1",
+            raw,
+            flags=re.IGNORECASE,
+        )
+        parts = _ARTIST_SPLIT_RE.split(cleaned)
+        names = []
+        seen = set()
+        for p in parts:
+            n = p.strip(" ,&;-()")
+            if n and n.lower() not in seen:
+                seen.add(n.lower())
+                names.append(n)
+        if not names:
+            names = [raw]
+
+    result = []
+    for idx, name in enumerate(names):
+        norm = re.sub(r"[^a-z0-9]+", " ", name.lower()).strip()
+        adamid = adam_by_alias.get(norm, "")
+        if not adamid and len(names) == 1 and ordered_adamids:
+            adamid = ordered_adamids[0]
+        elif not adamid and idx < len(ordered_adamids) and len(ordered_adamids) == len(names):
+            adamid = ordered_adamids[idx]
+
+        if adamid:
+            url = f"https://www.shazam.com/artist/-/{adamid}"
+        else:
+            url = f"https://music.youtube.com/search?q={urllib.parse.quote_plus(name)}"
+        result.append({"name": name, "adamid": adamid, "url": url})
+    return result
+
+
+def register_uri_protocol():
+    """Registers per-user songpulse:// URI protocol in HKCU so Windows toast clicks open SongPulse."""
+    try:
+        if IS_FROZEN:
+            cmd = f'"{sys.executable}" "%1"'
+        else:
+            exe = sys.executable
+            if exe.lower().endswith("python.exe"):
+                pyw = exe[:-10] + "pythonw.exe"
+                if os.path.exists(pyw):
+                    exe = pyw
+            entry = os.path.join(APP_DIR, "song_id_app.pyw")
+            cmd = f'"{exe}" "{entry}" "%1"'
+
+        base_key = r"Software\Classes\songpulse"
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, base_key) as k:
+            winreg.SetValueEx(k, "", 0, winreg.REG_SZ, "URL:SongPulse Protocol")
+            winreg.SetValueEx(k, "URL Protocol", 0, winreg.REG_SZ, "")
+        with winreg.CreateKey(
+            winreg.HKEY_CURRENT_USER, base_key + r"\shell\open\command"
+        ) as ck:
+            winreg.SetValueEx(ck, "", 0, winreg.REG_SZ, cmd)
+        return True
+    except Exception:
+        return False
 
 
 def ensure_ping_sound():
@@ -286,10 +831,11 @@ def get_nvidia_gpu_info():
 
 
 def is_cuda_provider_available():
-    if ort is None:
+    _ort = _try_load_ort()
+    if _ort is None:
         return False
     try:
-        return "CUDAExecutionProvider" in ort.get_available_providers()
+        return "CUDAExecutionProvider" in _ort.get_available_providers()
     except Exception:
         return False
 
@@ -367,7 +913,6 @@ def find_default_ytdlp_app() -> str:
             and "setup" not in base
         )
 
-    # 1. Check Windows Uninstall Registry (catches Inno Setup per-user AppData installs instantly)
     reg_paths = [
         (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Uninstall"),
         (winreg.HKEY_LOCAL_MACHINE, r"Software\Microsoft\Windows\CurrentVersion\Uninstall"),
@@ -407,13 +952,13 @@ def find_default_ytdlp_app() -> str:
         except OSError:
             continue
 
-    # 2. Scan AppData, Programs, Program Files, and sibling folders
     local_app = os.environ.get("LOCALAPPDATA", "")
     roaming_app = os.environ.get("APPDATA", "")
     search_roots = [
         os.path.join(local_app, "Programs"),
         local_app,
         roaming_app,
+        TOOLS_DIR,
         os.environ.get("ProgramFiles", r"C:\Program Files"),
         os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
         os.path.dirname(APP_DIR),

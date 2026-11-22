@@ -1,3 +1,4 @@
+import io
 import os
 import struct
 
@@ -6,6 +7,7 @@ from PyQt6.QtGui import (
     QBrush,
     QColor,
     QIcon,
+    QImage,
     QLinearGradient,
     QPainter,
     QPainterPath,
@@ -77,7 +79,9 @@ def export_multi_res_ico(out_path):
     blobs = []
     for sz, data in frames:
         dim = 0 if sz == 256 else sz
-        entries.append(struct.pack("<BBBBHHII", dim, dim, 0, 0, 1, 32, len(data), offset))
+        entries.append(
+            struct.pack("<BBBBHHII", dim, dim, 0, 0, 1, 32, len(data), offset)
+        )
         blobs.append(data)
         offset += len(data)
 
@@ -112,9 +116,13 @@ def ensure_chevron_icons():
         )
         p.setPen(pen)
         if direction == "down":
-            p.drawPolyline(QPolygonF([QPointF(3.0, 4.5), QPointF(6.0, 7.5), QPointF(9.0, 4.5)]))
+            p.drawPolyline(
+                QPolygonF([QPointF(3.0, 4.5), QPointF(6.0, 7.5), QPointF(9.0, 4.5)])
+            )
         else:
-            p.drawPolyline(QPolygonF([QPointF(3.0, 7.5), QPointF(6.0, 4.5), QPointF(9.0, 7.5)]))
+            p.drawPolyline(
+                QPolygonF([QPointF(3.0, 7.5), QPointF(6.0, 4.5), QPointF(9.0, 7.5)])
+            )
         p.end()
         pix.save(fpath, "PNG")
         paths[fname] = fpath.replace("\\", "/")
@@ -138,8 +146,16 @@ def create_ui_icon(kind: str, color_hex="#E4E4E7", size=16):
 
     s = float(size)
     if kind == "identify":
-        for x, h in [(0.16, 0.28), (0.33, 0.56), (0.50, 0.78), (0.67, 0.50), (0.84, 0.28)]:
-            p.drawLine(QPointF(s * x, s * (0.5 - h / 2)), QPointF(s * x, s * (0.5 + h / 2)))
+        for x, h in [
+            (0.16, 0.28),
+            (0.33, 0.56),
+            (0.50, 0.78),
+            (0.67, 0.50),
+            (0.84, 0.28),
+        ]:
+            p.drawLine(
+                QPointF(s * x, s * (0.5 - h / 2)), QPointF(s * x, s * (0.5 + h / 2))
+            )
     elif kind == "library":
         p.drawLine(QPointF(s * 0.20, s * 0.25), QPointF(s * 0.55, s * 0.25))
         p.drawLine(QPointF(s * 0.20, s * 0.50), QPointF(s * 0.48, s * 0.50))
@@ -157,8 +173,9 @@ def create_ui_icon(kind: str, color_hex="#E4E4E7", size=16):
         p.drawEllipse(QPointF(s * 0.68, s * 0.52), s * 0.10, s * 0.10)
         p.drawEllipse(QPointF(s * 0.42, s * 0.76), s * 0.10, s * 0.10)
     elif kind == "sidebar":
-        # Rounded rectangle with left sidebar panel divider (Gemini-style)
-        p.drawRoundedRect(QRectF(s * 0.12, s * 0.16, s * 0.76, s * 0.68), s * 0.16, s * 0.16)
+        p.drawRoundedRect(
+            QRectF(s * 0.12, s * 0.16, s * 0.76, s * 0.68), s * 0.16, s * 0.16
+        )
         p.drawLine(QPointF(s * 0.38, s * 0.18), QPointF(s * 0.38, s * 0.82))
     elif kind == "pin":
         p.drawLine(QPointF(s * 0.32, s * 0.20), QPointF(s * 0.68, s * 0.20))
@@ -172,6 +189,31 @@ def create_ui_icon(kind: str, color_hex="#E4E4E7", size=16):
         p.setBrush(QBrush(QColor(color_hex)))
         p.setPen(Qt.PenStyle.NoPen)
         p.drawEllipse(QPointF(s * 0.50, s * 0.32), s * 0.06, s * 0.06)
+    elif kind == "external":
+        # Clean minimal top-right arrow
+        pen.setWidthF(1.5)
+        p.setPen(pen)
+        p.drawLine(QPointF(s * 0.28, s * 0.72), QPointF(s * 0.74, s * 0.26))
+        p.drawPolyline(
+            QPolygonF(
+                [
+                    QPointF(s * 0.40, s * 0.26),
+                    QPointF(s * 0.74, s * 0.26),
+                    QPointF(s * 0.74, s * 0.60),
+                ]
+            )
+        )
+    elif kind in ("heart", "heart_filled"):
+        path = QPainterPath()
+        path.moveTo(s * 0.50, s * 0.82)
+        path.cubicTo(s * 0.14, s * 0.58, s * 0.12, s * 0.24, s * 0.32, s * 0.22)
+        path.cubicTo(s * 0.43, s * 0.21, s * 0.50, s * 0.31, s * 0.50, s * 0.35)
+        path.cubicTo(s * 0.50, s * 0.31, s * 0.57, s * 0.21, s * 0.68, s * 0.22)
+        path.cubicTo(s * 0.88, s * 0.24, s * 0.86, s * 0.58, s * 0.50, s * 0.82)
+        if kind == "heart_filled":
+            p.setBrush(QBrush(QColor(color_hex)))
+            p.setPen(Qt.PenStyle.NoPen)
+        p.drawPath(path)
 
     p.end()
     return QIcon(pix)
@@ -228,18 +270,24 @@ def create_platform_icon(kind: str, size=14):
         p.drawPolygon(tri)
     elif kind == "spotify":
         p.drawEllipse(QRectF(0, 0, size, size))
-        p.setPen(QPen(QColor("#FFFFFF"), 1.3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.setPen(
+            QPen(QColor("#FFFFFF"), 1.3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+        )
         p.drawArc(3, 4, size - 6, 4, 30 * 16, 120 * 16)
         p.drawArc(4, 7, size - 8, 4, 30 * 16, 120 * 16)
         p.drawArc(5, 10, size - 10, 3, 30 * 16, 120 * 16)
     elif kind == "shazam":
         p.drawEllipse(QRectF(0, 0, size, size))
-        p.setPen(QPen(QColor("#FFFFFF"), 1.7, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.setPen(
+            QPen(QColor("#FFFFFF"), 1.7, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+        )
         p.drawArc(3, 3, 6, 6, 40 * 16, 190 * 16)
         p.drawArc(size - 9, size - 9, 6, 6, 220 * 16, 190 * 16)
     elif kind == "apple":
         p.drawRoundedRect(QRectF(0, 0, size, size), 3, 3)
-        p.setPen(QPen(QColor("#FFFFFF"), 1.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.setPen(
+            QPen(QColor("#FFFFFF"), 1.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+        )
         p.drawLine(QPointF(5, 9), QPointF(5, 4))
         p.drawLine(QPointF(10, 8), QPointF(10, 3))
         p.drawLine(QPointF(5, 4), QPointF(10, 3))
@@ -249,17 +297,23 @@ def create_platform_icon(kind: str, size=14):
         p.drawEllipse(QRectF(8, 7, 3, 3))
     elif kind == "soundcloud":
         p.drawRoundedRect(QRectF(0, 1, size, size - 2), 4, 4)
-        p.setPen(QPen(QColor("#FFFFFF"), 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.setPen(
+            QPen(QColor("#FFFFFF"), 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+        )
         for x, y1, y2 in [(3.5, 9, 6), (6.0, 9, 4.5), (8.5, 9, 5), (11.0, 9, 6.5)]:
             p.drawLine(QPointF(x, y1), QPointF(x, y2))
     elif kind == "deezer":
         p.drawRoundedRect(QRectF(0, 0, size, size), 3, 3)
-        p.setPen(QPen(QColor("#FFFFFF"), 1.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.setPen(
+            QPen(QColor("#FFFFFF"), 1.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+        )
         for x, y1, y2 in [(3.5, 10, 7.5), (6.5, 10, 4.5), (9.5, 10, 6), (11.5, 10, 8)]:
             p.drawLine(QPointF(x, y1), QPointF(x, y2))
     elif kind == "amazon":
         p.drawRoundedRect(QRectF(0, 0, size, size), 3, 3)
-        p.setPen(QPen(QColor("#FFFFFF"), 1.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.setPen(
+            QPen(QColor("#FFFFFF"), 1.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+        )
         p.drawArc(3, 6, size - 6, 5, 200 * 16, 140 * 16)
         p.drawLine(QPointF(5, 4.5), QPointF(9, 4.5))
     elif kind == "tidal":
@@ -292,6 +346,62 @@ def create_platform_icon(kind: str, size=14):
 
     p.end()
     return QIcon(pix)
+
+
+def render_blurred_pixmap(
+    image_path: str, width: int, height: int, blur_radius: int = 8, fit_mode: str = "cover"
+) -> QPixmap:
+    """Renders an image for sidebar/background themes. Supports cover-crop or transparent cutout fitting."""
+    if not image_path or not os.path.isfile(image_path) or width <= 2 or height <= 2:
+        return QPixmap()
+    try:
+        from PIL import Image, ImageFilter
+
+        with Image.open(image_path) as im:
+            im = im.convert("RGBA")
+            iw, ih = im.size
+            if fit_mode == "cutout":
+                # Frame character cutout gracefully in the lower/middle area of the sidebar
+                canvas = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+                scale = max((width * 1.18) / max(1, iw), (height * 0.68) / max(1, ih))
+                nw = max(1, int(round(iw * scale)))
+                nh = max(1, int(round(ih * scale)))
+                resized = im.resize((nw, nh), Image.Resampling.LANCZOS)
+                paste_x = (width - nw) // 2
+                paste_y = max(int(height * 0.24), height - nh + int(nh * 0.08))
+                canvas.alpha_composite(resized, (paste_x, paste_y))
+                im = canvas
+            else:
+                scale = max(width / max(1, iw), height / max(1, ih))
+                nw = max(1, int(round(iw * scale)))
+                nh = max(1, int(round(ih * scale)))
+                im = im.resize((nw, nh), Image.Resampling.LANCZOS)
+                left = (nw - width) // 2
+                top = (nh - height) // 2
+                im = im.crop((left, top, left + width, top + height))
+            if blur_radius and blur_radius > 0:
+                im = im.filter(ImageFilter.GaussianBlur(radius=float(blur_radius)))
+            buf = io.BytesIO()
+            im.save(buf, format="PNG")
+            pix = QPixmap()
+            pix.loadFromData(buf.getvalue(), "PNG")
+            return pix
+    except Exception:
+        pix = QPixmap(image_path)
+        if pix.isNull():
+            return QPixmap()
+        scaled = pix.scaled(
+            width,
+            height,
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        return scaled.copy(
+            (scaled.width() - width) // 2,
+            (scaled.height() - height) // 2,
+            width,
+            height,
+        )
 
 
 def rounded_pixmap(path, size, radius=12):
@@ -342,8 +452,10 @@ def _perceived_luminance(rgb) -> float:
     return 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
 
 
-def extract_cover_gradient_colors(cover_path: str, dark: bool) -> dict:
-    """Extracts 2 dominant cover colors + accent, contrast-clamped for dark or light mode."""
+def extract_cover_gradient_colors(
+    cover_path: str, dark: bool, theme_cfg: dict | None = None
+) -> dict:
+    """Extracts 2 dominant cover colors + accent, blended with the active theme base colors."""
     resolved = resolve_cover_path(cover_path)
     default_c1 = (37, 99, 235)
     default_c2 = (124, 58, 237)
@@ -374,7 +486,6 @@ def extract_cover_gradient_colors(cover_path: str, dark: bool) -> dict:
                     else:
                         bot_samples.append((r, g, b))
 
-                    # Prefer saturated, mid-bright color for interactive accent controls
                     if 45 <= val <= 235 and sat > 40:
                         score = sat * 1.4 - abs(val - 155) * 0.4
                         if score > best_sat_score:
@@ -382,12 +493,7 @@ def extract_cover_gradient_colors(cover_path: str, dark: bool) -> dict:
                             accent = (r, g, b)
 
             def _avg_filtered(samples, fallback):
-                # Ignore extreme near-white/near-black pixels if chromatic pixels exist
-                mid = [
-                    rgb
-                    for rgb in samples
-                    if 28 < _perceived_luminance(rgb) < 230
-                ]
+                mid = [rgb for rgb in samples if 28 < _perceived_luminance(rgb) < 230]
                 use = mid if len(mid) >= 12 else samples
                 if not use:
                     return fallback
@@ -401,8 +507,30 @@ def extract_cover_gradient_colors(cover_path: str, dark: bool) -> dict:
             c1 = _avg_filtered(top_samples, default_c1)
             c2 = _avg_filtered(bot_samples, default_c2)
 
-    if dark:
-        # Rich dark gradient: strictly capped luminance so white text always pops
+    # Check if active theme provides a colored signature backdrop (e.g. Miku cyan-blue or Teto crimson gradient)
+    t_id = (theme_cfg or {}).get("id", "")
+    t_bg = (theme_cfg or {}).get("background", {})
+    t_cols = (theme_cfg or {}).get("colors", {})
+    use_theme_tint = t_id in ("miku", "teto") or t_id.startswith("custom:")
+
+    if use_theme_tint and t_bg.get("color1"):
+        qc1 = QColor(t_bg.get("color1", "#061926"))
+        qc2 = QColor(t_bg.get("color2", t_bg.get("color1", "#0C3E59")))
+        tb1 = (qc1.red(), qc1.green(), qc1.blue())
+        tb2 = (qc2.red(), qc2.green(), qc2.blue())
+        if dark:
+            # Blend album art gently onto the theme's signature gradient so it stays cohesive
+            g1 = _blend_rgb(c1, tb2, 0.72)
+            g2 = _blend_rgb(c2, tb1, 0.76)
+            base = tb1
+            if t_id in ("miku", "teto"):
+                qac = QColor(t_cols.get("accent", "#39C5BB"))
+                accent = _blend_rgb(accent, (qac.red(), qac.green(), qac.blue()), 0.55)
+        else:
+            g1 = _blend_rgb(c1, tb1, 0.72)
+            g2 = _blend_rgb(c2, tb2, 0.78)
+            base = tb2
+    elif dark:
         base = (17, 18, 22)
         g1 = _blend_rgb(c1, base, 0.56)
         g2 = _blend_rgb(c2, base, 0.68)
@@ -410,11 +538,9 @@ def extract_cover_gradient_colors(cover_path: str, dark: bool) -> dict:
             g1 = _blend_rgb(g1, base, 0.45)
         if _perceived_luminance(g2) > 74:
             g2 = _blend_rgb(g2, base, 0.45)
-        # Keep accent bright enough on dark UI
         if _perceived_luminance(accent) < 85:
             accent = _blend_rgb(accent, (96, 165, 250), 0.50)
     else:
-        # Soft pastel wash: strictly floored luminance so dark text always pops
         base = (238, 242, 248)
         g1 = _blend_rgb(c1, base, 0.66)
         g2 = _blend_rgb(c2, base, 0.76)
@@ -436,100 +562,103 @@ def extract_cover_gradient_colors(cover_path: str, dark: bool) -> dict:
     }
 
 
-def build_palette(dark: bool) -> QPalette:
+def build_palette(dark: bool, theme_cfg: dict | None = None) -> QPalette:
     """Sets an explicit QPalette so Windows Dark Mode never leaves white labels on Light Mode."""
     pal = QPalette()
+    tc = (theme_cfg or {}).get("colors", {})
+    accent = tc.get("accent", "#2563EB")
     if dark:
         pal.setColor(QPalette.ColorRole.Window, QColor("#111216"))
-        pal.setColor(QPalette.ColorRole.WindowText, QColor("#F4F4F5"))
+        pal.setColor(QPalette.ColorRole.WindowText, QColor(tc.get("text", "#F4F4F5")))
         pal.setColor(QPalette.ColorRole.Base, QColor("#1E2028"))
         pal.setColor(QPalette.ColorRole.AlternateBase, QColor("#1A1B21"))
-        pal.setColor(QPalette.ColorRole.Text, QColor("#F4F4F5"))
+        pal.setColor(QPalette.ColorRole.Text, QColor(tc.get("text", "#F4F4F5")))
         pal.setColor(QPalette.ColorRole.Button, QColor("#24262F"))
-        pal.setColor(QPalette.ColorRole.ButtonText, QColor("#F4F4F5"))
-        pal.setColor(QPalette.ColorRole.Highlight, QColor("#2563EB"))
+        pal.setColor(QPalette.ColorRole.ButtonText, QColor(tc.get("text", "#F4F4F5")))
+        pal.setColor(QPalette.ColorRole.Highlight, QColor(accent))
         pal.setColor(QPalette.ColorRole.HighlightedText, QColor("#FFFFFF"))
     else:
         pal.setColor(QPalette.ColorRole.Window, QColor("#E9EDF3"))
-        pal.setColor(QPalette.ColorRole.WindowText, QColor("#111827"))
+        pal.setColor(QPalette.ColorRole.WindowText, QColor(tc.get("text", "#111827")))
         pal.setColor(QPalette.ColorRole.Base, QColor("#F5F7FA"))
         pal.setColor(QPalette.ColorRole.AlternateBase, QColor("#ECEFF4"))
-        pal.setColor(QPalette.ColorRole.Text, QColor("#111827"))
+        pal.setColor(QPalette.ColorRole.Text, QColor(tc.get("text", "#111827")))
         pal.setColor(QPalette.ColorRole.Button, QColor("#EDF0F5"))
-        pal.setColor(QPalette.ColorRole.ButtonText, QColor("#111827"))
-        pal.setColor(QPalette.ColorRole.Highlight, QColor("#2563EB"))
+        pal.setColor(QPalette.ColorRole.ButtonText, QColor(tc.get("text", "#111827")))
+        pal.setColor(QPalette.ColorRole.Highlight, QColor(accent))
         pal.setColor(QPalette.ColorRole.HighlightedText, QColor("#FFFFFF"))
     return pal
 
 
-def build_stylesheet(dark: bool, chevrons: dict):
+def build_stylesheet(dark: bool, chevrons: dict, theme_cfg: dict | None = None):
     dn = chevrons["down_dark.png"] if dark else chevrons["down_light.png"]
     up = chevrons["up_dark.png"] if dark else chevrons["up_light.png"]
+
+    tc = (theme_cfg or {}).get("colors", {})
+    accent = tc.get("accent", "#2563EB")
+    accent2 = tc.get("accent_secondary", "#7C3AED")
 
     if dark:
         c = {
             "bg": "#111216",
-            "fg": "#F4F4F5",
-            "sidebar": "#17181D",
-            "sidebar_b": "#24262E",
-            "nav_fg": "#A1A1AA",
-            "nav_hover": "#22242C",
-            "card": "#1A1B21",
-            "card_b": "#272932",
-            "muted": "#9CA3AF",
-            "chip_bg": "#24262F",
-            "chip_fg": "#D4D4D8",
-            "inp_bg": "#1E2028",
-            "inp_b": "#2E303C",
-            "btn_bg": "#24262F",
-            "btn_fg": "#E4E4E7",
-            "btn_b": "#323542",
-            "btn_hover": "#323542",
-            "sec_bg": "#1F222C",
-            "sec_b": "#323646",
-            "sec_hover": "#2A2E3C",
-            "id_b": "#2A2D3E",
-            "id_dis_bg": "#272932",
+            "fg": tc.get("text", "#F4F4F5"),
+            "sidebar_b": tc.get("card_border", "#24262E"),
+            "nav_fg": tc.get("muted", "#A1A1AA"),
+            "nav_hover": "rgba(255, 255, 255, 0.09)",
+            "card": tc.get("card_bg", "#1A1B21"),
+            "card_b": tc.get("card_border", "#272932"),
+            "muted": tc.get("muted", "#9CA3AF"),
+            "chip_bg": "rgba(255, 255, 255, 0.08)",
+            "chip_fg": tc.get("text", "#D4D4D8"),
+            "inp_bg": "rgba(20, 24, 34, 0.78)",
+            "inp_b": tc.get("card_border", "#2E303C"),
+            "btn_bg": "rgba(255, 255, 255, 0.08)",
+            "btn_fg": tc.get("text", "#E4E4E7"),
+            "btn_b": "rgba(255, 255, 255, 0.14)",
+            "btn_hover": "rgba(255, 255, 255, 0.16)",
+            "sec_bg": "rgba(255, 255, 255, 0.08)",
+            "sec_b": "rgba(255, 255, 255, 0.16)",
+            "sec_hover": "rgba(255, 255, 255, 0.15)",
+            "id_b": "rgba(255, 255, 255, 0.22)",
+            "id_dis_bg": "rgba(39, 41, 50, 0.85)",
             "id_dis_fg": "#71717A",
-            "id_dis_b": "#1E2028",
+            "id_dis_b": "rgba(255, 255, 255, 0.08)",
             "danger_fg": "#F87171",
-            "danger_b": "#451A1A",
-            "danger_hover": "#451A1A",
-            "warn_bg": "rgba(245, 158, 11, 0.13)",
+            "danger_b": "rgba(248, 113, 113, 0.35)",
+            "danger_hover": "rgba(239, 68, 68, 0.18)",
+            "warn_bg": "rgba(245, 158, 11, 0.14)",
             "warn_b": "rgba(245, 158, 11, 0.38)",
             "warn_fg": "#FBBF24",
-            "err_bg": "rgba(239, 68, 68, 0.13)",
+            "err_bg": "rgba(239, 68, 68, 0.14)",
             "err_b": "rgba(239, 68, 68, 0.40)",
             "err_fg": "#F87171",
-            "help_bg": "#272932",
-            "help_fg": "#A1A1AA",
-            "help_b": "#383B4A",
-            "menu_bg": "#1C1E26",
-            "scroll_h": "#323542",
-            "song_hover_bg": "#202432",
-            "song_hover_b": "#60A5FA",
+            "help_bg": "rgba(255, 255, 255, 0.09)",
+            "help_fg": tc.get("muted", "#A1A1AA"),
+            "help_b": "rgba(255, 255, 255, 0.16)",
+            "menu_bg": "#181C26",
+            "scroll_h": "rgba(255, 255, 255, 0.22)",
+            "song_hover_bg": "rgba(255, 255, 255, 0.08)",
+            "song_hover_b": accent,
         }
     else:
-        # Layered soft-gray Light Mode with crisp contrast
         c = {
             "bg": "#E9EDF3",
-            "fg": "#111827",
-            "sidebar": "#F4F6FA",
-            "sidebar_b": "#D6DCE6",
-            "nav_fg": "#475569",
-            "nav_hover": "#E2E7F0",
-            "card": "#FFFFFF",
-            "card_b": "#D4DBE6",
-            "muted": "#526075",
-            "chip_bg": "#E8EDF5",
+            "fg": tc.get("text", "#111827"),
+            "sidebar_b": tc.get("card_border", "#D6DCE6"),
+            "nav_fg": tc.get("muted", "#475569"),
+            "nav_hover": "rgba(15, 23, 42, 0.07)",
+            "card": tc.get("card_bg", "#FFFFFF"),
+            "card_b": tc.get("card_border", "#D4DBE6"),
+            "muted": tc.get("muted", "#526075"),
+            "chip_bg": "rgba(15, 23, 42, 0.06)",
             "chip_fg": "#334155",
-            "inp_bg": "#F5F7FB",
+            "inp_bg": "rgba(255, 255, 255, 0.90)",
             "inp_b": "#C8D1DF",
-            "btn_bg": "#EDF1F7",
+            "btn_bg": "rgba(15, 23, 42, 0.05)",
             "btn_fg": "#1E293B",
-            "btn_b": "#CBD4E1",
-            "btn_hover": "#DFE6F0",
-            "sec_bg": "#FFFFFF",
+            "btn_b": "rgba(15, 23, 42, 0.14)",
+            "btn_hover": "rgba(15, 23, 42, 0.11)",
+            "sec_bg": "rgba(255, 255, 255, 0.85)",
             "sec_b": "#C8D1DF",
             "sec_hover": "#EDF1F7",
             "id_b": "#BFDBFE",
@@ -550,15 +679,22 @@ def build_stylesheet(dark: bool, chevrons: dict):
             "help_b": "#C2CCDC",
             "menu_bg": "#FFFFFF",
             "scroll_h": "#BCC6D6",
-            "song_hover_bg": "#F5F9FF",
-            "song_hover_b": "#3B82F6",
+            "song_hover_bg": "rgba(37, 99, 235, 0.06)",
+            "song_hover_b": accent,
         }
 
+    ac_col = QColor(accent)
+    ac_text = "#0B1220" if _perceived_luminance((ac_col.red(), ac_col.green(), ac_col.blue())) > 175 else "#FFFFFF"
+
     return f"""
-QMainWindow, QWidget#Root {{
+QMainWindow {{
     background-color: {c['bg']};
     color: {c['fg']};
     font-family: "Segoe UI", sans-serif;
+}}
+QWidget#Root {{
+    background-color: transparent;
+    color: {c['fg']};
 }}
 QWidget {{
     color: {c['fg']};
@@ -572,7 +708,7 @@ QStackedWidget, QWidget#Page, QWidget#ScrollContent, QScrollArea, QScrollArea > 
     border: none;
 }}
 QFrame#Sidebar {{
-    background-color: {c['sidebar']};
+    background-color: transparent;
     border-right: 1px solid {c['sidebar_b']};
 }}
 QPushButton#NavBtn {{
@@ -590,13 +726,43 @@ QPushButton#NavBtn:hover {{
     color: {c['fg']};
 }}
 QPushButton#NavBtn[active="true"] {{
-    background-color: #2563EB;
-    color: #FFFFFF;
+    background-color: {accent};
+    color: {ac_text};
     font-weight: 600;
 }}
 QPushButton#NavBtn[collapsed="true"] {{
     text-align: center;
     padding: 9px 0px;
+}}
+QPushButton#PlaylistTab {{
+    background-color: {c['btn_bg']};
+    color: {c['btn_fg']};
+    border: 1px solid {c['btn_b']};
+    border-radius: 14px;
+    padding: 5px 12px;
+    font-size: 12px;
+    font-weight: 600;
+}}
+QPushButton#PlaylistTab:hover {{
+    background-color: {c['btn_hover']};
+    border-color: {accent};
+}}
+QPushButton#PlaylistTab[active="true"] {{
+    background-color: {accent};
+    color: {ac_text};
+    border-color: {accent};
+}}
+QPushButton#CollapseBtn {{
+    text-align: left;
+    background: transparent;
+    border: none;
+    color: {c['fg']};
+    font-size: 14px;
+    font-weight: 600;
+    padding: 2px 0px;
+}}
+QPushButton#CollapseBtn:hover {{
+    color: {accent};
 }}
 QPushButton#SidebarIconBtn {{
     background: transparent;
@@ -608,8 +774,8 @@ QPushButton#SidebarIconBtn:hover {{
     background-color: {c['nav_hover']};
 }}
 QPushButton#SidebarIconBtn[pinned="true"] {{
-    background-color: rgba(37, 99, 235, 0.18);
-    border: 1px solid #3B82F6;
+    background-color: rgba(59, 130, 246, 0.18);
+    border: 1px solid {accent};
 }}
 QFrame#Card {{
     background-color: {c['card']};
@@ -654,26 +820,26 @@ QLabel#HelpBadge {{
     font-weight: 700;
 }}
 QLabel#HelpBadge:hover {{
-    background-color: #3B82F6;
-    color: #FFFFFF;
-    border-color: #3B82F6;
+    background-color: {accent};
+    color: {ac_text};
+    border-color: {accent};
 }}
 QPushButton#IdentifyBtn {{
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #3B82F6, stop:1 #7C3AED);
-    color: #FFFFFF;
-    border: 3px solid {c['id_b']};
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {accent}, stop:1 {accent2});
+    color: {ac_text};
+    border: none;
     border-radius: 66px;
     font-size: 15px;
     font-weight: 700;
 }}
 QPushButton#IdentifyBtn:hover {{
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #60A5FA, stop:1 #8B5CF6);
-    border: 3px solid #60A5FA;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {accent2}, stop:1 {accent});
+    border: none;
 }}
 QPushButton#IdentifyBtn:disabled {{
     background: {c['id_dis_bg']};
     color: {c['id_dis_fg']};
-    border: 3px solid {c['id_dis_b']};
+    border: none;
 }}
 QPushButton#SecondaryActionBtn {{
     background-color: {c['sec_bg']};
@@ -686,14 +852,14 @@ QPushButton#SecondaryActionBtn {{
 }}
 QPushButton#SecondaryActionBtn:hover {{
     background-color: {c['sec_hover']};
-    border-color: #3B82F6;
+    border-color: {accent};
 }}
 QPushButton#SecondaryActionBtn:disabled {{
     color: {c['muted']};
 }}
 QPushButton#PrimaryBtn {{
-    background-color: #2563EB;
-    color: #FFFFFF;
+    background-color: {accent};
+    color: {ac_text};
     border: none;
     border-radius: 8px;
     padding: 8px 16px;
@@ -701,7 +867,7 @@ QPushButton#PrimaryBtn {{
     font-weight: 600;
 }}
 QPushButton#PrimaryBtn:hover {{
-    background-color: #3B82F6;
+    border: 1px solid {c['fg']};
 }}
 QPushButton#PlatformBtn {{
     background-color: {c['btn_bg']};
@@ -714,11 +880,24 @@ QPushButton#PlatformBtn {{
 }}
 QPushButton#PlatformBtn:hover {{
     background-color: {c['btn_hover']};
-    border-color: #3B82F6;
+    border-color: {accent};
 }}
 QPushButton#PlatformBtn::menu-indicator {{
     image: none;
     width: 0px;
+}}
+QPushButton#SubtleIconBtn {{
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    padding: 0px;
+    color: {c['muted']};
+    font-size: 12px;
+    font-weight: 700;
+}}
+QPushButton#SubtleIconBtn:hover {{
+    background-color: {c['btn_hover']};
+    color: {c['fg']};
 }}
 QPushButton#DangerBtn {{
     background-color: transparent;
@@ -763,7 +942,7 @@ QLineEdit, QComboBox, QSpinBox {{
     font-size: 12px;
 }}
 QLineEdit:focus, QComboBox:focus, QSpinBox:focus {{
-    border-color: #3B82F6;
+    border-color: {accent};
 }}
 QComboBox {{
     padding-right: 26px;
@@ -781,11 +960,11 @@ QComboBox::down-arrow {{
     height: 12px;
 }}
 QComboBox QAbstractItemView {{
-    background-color: {c['card']};
+    background-color: {c['menu_bg']};
     color: {c['fg']};
     border: 1px solid {c['btn_b']};
-    selection-background-color: #2563EB;
-    selection-color: #FFFFFF;
+    selection-background-color: {accent};
+    selection-color: {ac_text};
     padding: 4px;
     outline: none;
 }}
@@ -837,13 +1016,13 @@ QMenu::item {{
     font-size: 12px;
 }}
 QMenu::item:selected {{
-    background-color: #2563EB;
-    color: #FFFFFF;
+    background-color: {accent};
+    color: {ac_text};
 }}
 QToolTip {{
     background-color: {c['menu_bg']};
     color: {c['fg']};
-    border: 1px solid #3B82F6;
+    border: 1px solid {accent};
     border-radius: 6px;
     padding: 6px 8px;
     font-size: 11px;
@@ -852,6 +1031,29 @@ QCheckBox {{
     color: {c['fg']};
     spacing: 8px;
     font-size: 12px;
+}}
+QRadioButton {{
+    color: {c['fg']};
+    spacing: 6px;
+    font-size: 12px;
+}}
+QDialog {{
+    background-color: {c['bg']};
+    color: {c['fg']};
+}}
+QProgressBar {{
+    background-color: {c['inp_bg']};
+    color: {c['fg']};
+    border: 1px solid {c['inp_b']};
+    border-radius: 6px;
+    text-align: center;
+    height: 18px;
+    font-size: 11px;
+    font-weight: 600;
+}}
+QProgressBar::chunk {{
+    background-color: {accent};
+    border-radius: 5px;
 }}
 QScrollBar:vertical {{
     background: transparent;
