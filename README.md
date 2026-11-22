@@ -2,7 +2,7 @@
 
 A lightweight Windows desktop music identifier that listens directly to your PC's system audio, even while wearing headphones or using multiple audio outputs, with optional local AI rescue for tricky tracks.
 
-<img width="720" alt="Identify Tab" src="https://github.com/user-attachments/assets/bf915661-93ea-4d7c-b8ae-2ecf3c65d5ac" />
+<img width="720" alt="Identify Tab" src="https://github.com/user-attachments/assets/de12b4a4-edab-47f2-b3e3-90903ec7d822" />
 
 ---
 
@@ -21,16 +21,19 @@ A lightweight Windows desktop music identifier that listens directly to your PC'
   - Reorder custom playlists manually via drag-and-drop or move arrows, or sort by Date, Title, Artist, Genre, or Album.
   - Multi-select checkboxes and **Select All** with top-right **Add to Playlist**, **Batch Download (yt-dlp)**, and **Clear Selected** actions.
 
-  <img width="720" alt="Library Tab" src="https://github.com/user-attachments/assets/460ec2ef-836a-48c8-a3d3-b4b2753c6786" />
+  <img width="480" alt="History Tab" src="https://github.com/user-attachments/assets/f6aa6dd2-60ef-4520-ac0a-a928f3d085f2" /><img width="480" alt="Liked Tab" src="https://github.com/user-attachments/assets/f32a99be-6440-460e-87a6-f9d51a47ce89" />
 
 - **Custom Themes, Miku & Teto Themes, and Custom Waveforms:**
   - Built-in **Match Windows**, **Dark**, **Light**, **Miku** (blue gradient, Miku sidebar cutout, diamond hair ties, and stereo Pulse Line waveform), and **Teto** (crimson gradient, Teto sidebar cutout, top-right white bow, and stereo Horizontal Split waveform with alternating red/white right bars).
+  
+  <img width="480" alt="Miku Theme" src="https://github.com/user-attachments/assets/af095c3a-b75a-4d4d-b69c-f3d0b1c6ad80" /><img width="480" alt="Teto Theme" src="https://github.com/user-attachments/assets/f8b13dd8-7cf2-481f-ae31-015d7e56c51c" />
+
   - Create custom themes visually in **Settings -> Create Theme** or edit JSON templates in `themes/` with solid colors, gradients, or photos for both the background and sidebar.
   - Customize waveform shape (**Radial**, **Horizontal Split**, **Pulse Line**, **Bottom Bar**, **Dots Ring**), mirroring, idle resting dots, and max width.
 - **Rich Song Details, In-App Artist/Album Popup & Full Web Player:**
   - Dynamic album-art gradient detail view with responsive wrapped platform buttons, separated clickable artist chips, sticky top action bar, centered in-app Artist and Album info popups (clicking the name/title inside opens on your chosen site from Settings), built-in 30s audio preview, and a lightweight **Full Player** web viewer.
 
-  <img width="720" alt="Detailed View" src="https://github.com/user-attachments/assets/68917bbb-4f81-40f7-bf28-53218a732f38" />
+  <img width="720" alt="Detailed View" src="https://github.com/user-attachments/assets/e7fee23c-181d-4fb1-933f-1b3817184380" />
 
   - Clicking either the themed bottom-right popup or a native Windows toast notification focuses SongPulse directly on that song's detailed view and closes the notification.
   - Quick links to Shazam, YouTube, YouTube Music, Spotify, Apple Music, SoundCloud, Deezer, Amazon Music, and Tidal, plus one-click **Copy Link** and **Download with yt-dlp** integration (with automatic setup prompt if not installed).
