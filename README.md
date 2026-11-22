@@ -6,7 +6,7 @@ A lightweight Windows desktop music identifier that listens directly to your PC'
 
 ---
 
-## Features (v1.1.0)
+## Features (v1.1.1)
 
 - **Multi-Output Desktop Audio Capture:** Listens directly to one or more Windows playback devices simultaneously via WASAPI loopback without needing a microphone or virtual audio cables. Includes an option to disable the rolling RAM buffer when you only want Listen Live.
 - **Two Listening Modes:**
@@ -61,7 +61,7 @@ A lightweight Windows desktop music identifier that listens directly to your PC'
 
 ### Option 1: Windows Installer (Recommended)
 
-1. Download `SongPulse_Setup_v1.1.0.exe` from the [Releases](https://github.com/Greatly07/songpulse/releases/latest) page.
+1. Download `SongPulse_Setup_v1.1.1.exe` from the [Releases](https://github.com/Greatly07/songpulse/releases/latest) page.
 2. Run the installer (installs per-user to `%LOCALAPPDATA%\Programs\SongPulse`; no admin rights required).
 3. Choose **Compact installation** (Core only, smallest footprint) or **Custom installation** to optionally include the AI Engine and models.
 4. Launch **SongPulse** from your Start Menu.

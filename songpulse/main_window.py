@@ -50,6 +50,7 @@ from .config import (
     DEFAULT_SETTINGS,
     GITHUB_REPO,
     ICON_CACHE_FILE,
+    ICON_COLOR_PRESETS,
     MODELS_DIR,
     PREFERRED_INFO_SITES,
     THEMES_DIR,
@@ -71,6 +72,7 @@ from .config import (
     load_history,
     load_playlists,
     load_settings,
+    open_external_url,
     play_ping_sound,
     save_history,
     save_playlists,
@@ -89,9 +91,13 @@ from .dialogs import (
 from .theme import (
     build_palette,
     build_stylesheet,
+    create_app_icon,
+    create_app_pixmap,
     create_platform_icon,
     create_ui_icon,
     ensure_chevron_icons,
+    export_multi_res_ico,
+    resolve_icon_colors,
     rounded_pixmap,
 )
 from .themes_manager import (
@@ -100,6 +106,7 @@ from .themes_manager import (
     load_theme_config,
 )
 from .widgets import (
+    AudioOutputListWidget,
     CheckableComboBox,
     ClickableCard,
     FlowLayout,
@@ -109,6 +116,8 @@ from .widgets import (
     HistoryRowCard,
     HotkeyRecorderEdit,
     NoWheelComboBox,
+    NoWheelDoubleSpinBox,
+    NoWheelSlider,
     NoWheelSpinBox,
     PulseIdentifyWidget,
     ResponsiveLinksBar,
@@ -155,6 +164,7 @@ def _label_with_help(text: str, tip: str):
 
 class SongPulseWindow(QMainWindow):
     hotkey_signal = pyqtSignal()
+    gpu_info_signal = pyqtSignal(object)
 
     SIDEBAR_EXPANDED_W = 204
     SIDEBAR_COLLAPSED_W = 62
@@ -194,14 +204,18 @@ class SongPulseWindow(QMainWindow):
         self.tray_hint_shown = False
         self.last_dark_state = None
         self._last_theme_sig = None
+        self._last_wf_sig = None
+        self._last_icon_colors = None
         self._current_theme_cfg = None
+        self._cached_gpu_info = None
+        self._gpu_poll_busy = False
         self.registered_hotkey = None
 
         self.sidebar_collapsed = False
         self.sidebar_user_collapsed = False
         self.is_pinned = bool(self.settings.get("always_on_top", False))
 
-        self.setWindowTitle(f"{APP_NAME} v{APP_VERSION}")
+        self.setWindowTitle(APP_NAME)
         self.setWindowIcon(self.app_icon)
         self.setMinimumSize(540, 480)
         if self.settings.get("save_window_size", True):
@@ -240,6 +254,12 @@ class SongPulseWindow(QMainWindow):
             enable_buffer=self.settings.get("enable_audio_buffer", True),
         )
         self.engine.start()
+        if not self.settings.get("remembered_devices"):
+            init_rem = list(self.engine.all_speaker_names or [])
+            if init_rem:
+                self.settings["remembered_devices"] = init_rem
+                self._saved_settings_snapshot["remembered_devices"] = list(init_rem)
+                save_settings(self.settings)
 
         self.sidebar_anim = QVariantAnimation(self)
         self.sidebar_anim.setDuration(200)
@@ -254,6 +274,7 @@ class SongPulseWindow(QMainWindow):
         self._update_pin_button_ui()
 
         self.hotkey_signal.connect(self._on_hotkey_triggered)
+        self.gpu_info_signal.connect(self._on_gpu_info_ready)
         self._register_hotkey(self.settings.get("hotkey", "ctrl+alt+s"))
 
         self.wave_timer = QTimer(self)
@@ -477,7 +498,7 @@ class SongPulseWindow(QMainWindow):
 
         center_col = QWidget()
         center_col.setObjectName("Page")
-        center_col.setMaximumWidth(860)
+        center_col.setMaximumWidth(1280)
         center_col.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout = QVBoxLayout(center_col)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -625,12 +646,18 @@ class SongPulseWindow(QMainWindow):
         info_col.addWidget(self.links_bar)
         card_lay.addLayout(info_col, 1)
 
-        layout.addWidget(self.result_card)
+        self.result_card.setMaximumWidth(820)
+        res_wrap = QHBoxLayout()
+        res_wrap.setContentsMargins(0, 0, 0, 0)
+        res_wrap.addStretch(1)
+        res_wrap.addWidget(self.result_card, 100)
+        res_wrap.addStretch(1)
+        layout.addLayout(res_wrap)
         layout.addStretch(2)
 
-        outer.addStretch(1)
-        outer.addWidget(center_col, 10)
-        outer.addStretch(1)
+        outer.addStretch(0)
+        outer.addWidget(center_col, 1)
+        outer.addStretch(0)
 
         page_lay.addWidget(_make_clean_scroll(scroll_inner, horizontal_off=True))
 
@@ -877,6 +904,26 @@ class SongPulseWindow(QMainWindow):
         theme_row.addWidget(themes_dir_btn)
         app_lay.addLayout(theme_row)
 
+        icon_row = QHBoxLayout()
+        icon_row.setSpacing(8)
+        icon_row.addLayout(
+            _label_with_help(
+                "App Icon Color",
+                "Changes the SongPulse icon in the taskbar, titlebar, tray, and sidebar live.",
+            )
+        )
+        icon_row.addStretch()
+        self.icon_color_combo = NoWheelComboBox()
+        self.icon_color_combo.setMinimumWidth(190)
+        for pid, plbl, pc1, pc2 in ICON_COLOR_PRESETS:
+            if pc1 and pc2:
+                self.icon_color_combo.addItem(QIcon(create_app_pixmap(18, pc1, pc2)), plbl, pid)
+            else:
+                self.icon_color_combo.addItem(plbl, pid)
+        self.icon_color_combo.currentIndexChanged.connect(self._mark_unsaved)
+        icon_row.addWidget(self.icon_color_combo)
+        app_lay.addLayout(icon_row)
+
         wf_row = QHBoxLayout()
         wf_row.setSpacing(8)
         wf_row.addWidget(QLabel("Waveform Shape"))
@@ -902,17 +949,57 @@ class SongPulseWindow(QMainWindow):
         self.wf_mirror_chk.stateChanged.connect(self._mark_unsaved)
         self.wf_idle_dots_chk = QCheckBox("Show dots when silent")
         self.wf_idle_dots_chk.stateChanged.connect(self._mark_unsaved)
-        self.wf_maxw_spin = NoWheelSpinBox()
-        self.wf_maxw_spin.setRange(300, 900)
-        self.wf_maxw_spin.setSingleStep(20)
-        self.wf_maxw_spin.setPrefix("Max width: ")
-        self.wf_maxw_spin.setSuffix(" px")
-        self.wf_maxw_spin.valueChanged.connect(self._mark_unsaved)
         wf_opts_row.addWidget(self.wf_mirror_chk)
         wf_opts_row.addWidget(self.wf_idle_dots_chk)
         wf_opts_row.addStretch()
-        wf_opts_row.addWidget(self.wf_maxw_spin)
         app_lay.addLayout(wf_opts_row)
+
+        maxw_row = QHBoxLayout()
+        maxw_row.setSpacing(10)
+        maxw_row.addWidget(QLabel("Waveform Max Width"))
+        self.wf_maxw_slider = NoWheelSlider(Qt.Orientation.Horizontal)
+        self.wf_maxw_slider.setRange(260, 900)
+        self.wf_maxw_slider.setSingleStep(10)
+        self.wf_maxw_slider.setPageStep(40)
+        self.wf_maxw_spin = NoWheelSpinBox()
+        self.wf_maxw_spin.setRange(260, 900)
+        self.wf_maxw_spin.setSingleStep(10)
+        self.wf_maxw_spin.setSuffix(" px")
+        self.wf_maxw_spin.setFixedWidth(92)
+        self.wf_maxw_slider.valueChanged.connect(self._on_wf_maxw_slider_changed)
+        self.wf_maxw_spin.valueChanged.connect(self._on_wf_maxw_spin_changed)
+        maxw_row.addWidget(self.wf_maxw_slider, 1)
+        maxw_row.addWidget(self.wf_maxw_spin)
+        app_lay.addLayout(maxw_row)
+
+        step_row = QHBoxLayout()
+        step_row.setSpacing(10)
+        step_row.addLayout(
+            _label_with_help(
+                "Waveform Spacing (Step)",
+                "Adjust distance between waveform bars or zig-zag peaks (Auto uses each style's default).",
+            )
+        )
+        self.wf_step_slider = NoWheelSlider(Qt.Orientation.Horizontal)
+        self.wf_step_slider.setRange(0, 240)  # 0 = Auto, 40..240 = 4.0..24.0 px
+        self.wf_step_slider.setSingleStep(5)
+        self.wf_step_spin = NoWheelDoubleSpinBox()
+        self.wf_step_spin.setRange(0.0, 24.0)
+        self.wf_step_spin.setDecimals(1)
+        self.wf_step_spin.setSingleStep(0.5)
+        self.wf_step_spin.setSpecialValueText("Auto")
+        self.wf_step_spin.setSuffix(" px")
+        self.wf_step_spin.setFixedWidth(92)
+        self.wf_step_auto_btn = QPushButton("Auto")
+        self.wf_step_auto_btn.setObjectName("PlatformBtn")
+        self.wf_step_auto_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.wf_step_auto_btn.clicked.connect(lambda: self.wf_step_spin.setValue(0.0))
+        self.wf_step_slider.valueChanged.connect(self._on_wf_step_slider_changed)
+        self.wf_step_spin.valueChanged.connect(self._on_wf_step_spin_changed)
+        step_row.addWidget(self.wf_step_slider, 1)
+        step_row.addWidget(self.wf_step_spin)
+        step_row.addWidget(self.wf_step_auto_btn)
+        app_lay.addLayout(step_row)
 
         self.save_win_size_chk = QCheckBox("Remember window size")
         self.save_win_size_chk.stateChanged.connect(self._mark_unsaved)
@@ -1059,26 +1146,29 @@ class SongPulseWindow(QMainWindow):
         sec3.setStyleSheet("font-size: 14px; font-weight: 600;")
         aud_lay.addWidget(sec3)
 
-        dev_row = QHBoxLayout()
-        dev_row.addLayout(
+        dev_hdr = QHBoxLayout()
+        dev_hdr.addLayout(
             _label_with_help(
-                "Audio Outputs",
-                "Pick one or more speakers/headphones for SongPulse to listen to.",
+                "Remembered Audio Outputs",
+                "Check the speakers/headphones SongPulse should listen to. Disconnected outputs stay remembered until you remove them; Refresh scans for new outputs.",
             )
         )
-        self.dev_combo = CheckableComboBox()
-        self.dev_combo.setMinimumWidth(200)
-        self.dev_combo.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
-        )
-        self.dev_combo.selection_changed.connect(lambda _: self._mark_unsaved())
+        dev_hdr.addStretch()
+        self.dev_status_lbl = QLabel("")
+        self.dev_status_lbl.setObjectName("Muted")
+        self.dev_status_lbl.setStyleSheet("font-size: 11px;")
+        dev_hdr.addWidget(self.dev_status_lbl)
         ref_btn = QPushButton("Refresh")
         ref_btn.setObjectName("PlatformBtn")
         ref_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        ref_btn.setToolTip("Scan for newly connected audio outputs")
         ref_btn.clicked.connect(self._refresh_devices_dropdown)
-        dev_row.addWidget(self.dev_combo, 1)
-        dev_row.addWidget(ref_btn)
-        aud_lay.addLayout(dev_row)
+        dev_hdr.addWidget(ref_btn)
+        aud_lay.addLayout(dev_hdr)
+
+        self.audio_outputs_list = AudioOutputListWidget()
+        self.audio_outputs_list.changed.connect(self._mark_unsaved)
+        aud_lay.addWidget(self.audio_outputs_list)
 
         self.enable_buf_chk = QCheckBox(
             "Keep recent audio buffer in RAM (disable to save RAM; Listen Live still works)"
@@ -1365,10 +1455,47 @@ class SongPulseWindow(QMainWindow):
             self._refresh_theme_dropdown(dlg.created_theme_key)
             self._mark_unsaved()
 
+    def _on_wf_maxw_slider_changed(self, val: int):
+        self.wf_maxw_spin.blockSignals(True)
+        self.wf_maxw_spin.setValue(val)
+        self.wf_maxw_spin.blockSignals(False)
+        self._mark_unsaved()
+
+    def _on_wf_maxw_spin_changed(self, val: int):
+        self.wf_maxw_slider.blockSignals(True)
+        self.wf_maxw_slider.setValue(val)
+        self.wf_maxw_slider.blockSignals(False)
+        self._mark_unsaved()
+
+    def _on_wf_step_slider_changed(self, raw: int):
+        val = 0.0 if raw < 40 else (raw / 10.0)
+        self.wf_step_spin.blockSignals(True)
+        self.wf_step_spin.setValue(val)
+        self.wf_step_spin.blockSignals(False)
+        self._mark_unsaved()
+
+    def _on_wf_step_spin_changed(self, val: float):
+        if 0.0 < val < 4.0:
+            val = 4.0
+            self.wf_step_spin.blockSignals(True)
+            self.wf_step_spin.setValue(val)
+            self.wf_step_spin.blockSignals(False)
+        raw = 0 if val < 4.0 else int(round(val * 10.0))
+        self.wf_step_slider.blockSignals(True)
+        self.wf_step_slider.setValue(raw)
+        self.wf_step_slider.blockSignals(False)
+        self._mark_unsaved()
+
     def _populate_settings_ui(self):
         self._suppress_unsaved = True
         try:
             self._refresh_theme_dropdown(self.settings.get("theme", "auto"))
+
+            ic_pref = self.settings.get("icon_color", "theme")
+            for idx in range(self.icon_color_combo.count()):
+                if self.icon_color_combo.itemData(idx) == ic_pref:
+                    self.icon_color_combo.setCurrentIndex(idx)
+                    break
 
             wf_map = {"auto": 0, "radial": 1, "horizontal": 2, "pulse_line": 3, "bar": 4, "dots": 5}
             self.wf_style_combo.setCurrentIndex(
@@ -1376,7 +1503,12 @@ class SongPulseWindow(QMainWindow):
             )
             self.wf_mirror_chk.setChecked(bool(self.settings.get("waveform_mirror", False)))
             self.wf_idle_dots_chk.setChecked(bool(self.settings.get("waveform_idle_dots", False)))
-            self.wf_maxw_spin.setValue(int(self.settings.get("waveform_max_width", 620)))
+            max_w = int(self.settings.get("waveform_max_width", 620))
+            self.wf_maxw_spin.setValue(max_w)
+            self.wf_maxw_slider.setValue(max_w)
+            wf_step = float(self.settings.get("waveform_step", 0.0) or 0.0)
+            self.wf_step_spin.setValue(wf_step)
+            self.wf_step_slider.setValue(0 if wf_step < 4.0 else int(round(wf_step * 10.0)))
 
             self.save_win_size_chk.setChecked(
                 bool(self.settings.get("save_window_size", True))
@@ -1421,12 +1553,20 @@ class SongPulseWindow(QMainWindow):
             )
             self.gpu_thresh_spin.setValue(int(self.settings.get("gpu_threshold", 65)))
 
-            all_devs = self.engine.all_speaker_names or list_speakers_safe()
-            self.dev_combo.set_items(
-                all_devs,
+            connected_devs = self.engine.all_speaker_names or list_speakers_safe()
+            remembered = list(self.settings.get("remembered_devices") or [])
+            if not remembered:
+                remembered = list(connected_devs)
+            for td in self.settings.get("target_devices") or []:
+                if td and td not in remembered:
+                    remembered.append(td)
+            self.audio_outputs_list.set_devices(
+                remembered,
                 self.settings.get("target_devices", []),
+                connected_devs,
                 monitor_all=bool(self.settings.get("monitor_all_devices", True)),
             )
+            self.dev_status_lbl.setText("")
             self.has_unsaved_settings = False
             self.unsaved_lbl.setText("")
             self.discard_changes_btn.hide()
@@ -1436,6 +1576,7 @@ class SongPulseWindow(QMainWindow):
         self._rebuild_ai_models_ui()
         self._refresh_storage_summary()
         self._update_gpu_indicator()
+        self._refresh_gpu_info_async()
 
     def _mark_unsaved(self, *_args):
         if getattr(self, "_suppress_unsaved", False):
@@ -1452,11 +1593,13 @@ class SongPulseWindow(QMainWindow):
         old_buf_en = bool(self.settings.get("enable_audio_buffer", True))
 
         self.settings["theme"] = self.theme_combo.currentData() or "auto"
+        self.settings["icon_color"] = self.icon_color_combo.currentData() or "theme"
         wf_styles = ["auto", "radial", "horizontal", "pulse_line", "bar", "dots"]
         self.settings["waveform_style"] = wf_styles[max(0, self.wf_style_combo.currentIndex())]
         self.settings["waveform_mirror"] = self.wf_mirror_chk.isChecked()
         self.settings["waveform_idle_dots"] = self.wf_idle_dots_chk.isChecked()
         self.settings["waveform_max_width"] = self.wf_maxw_spin.value()
+        self.settings["waveform_step"] = round(float(self.wf_step_spin.value()), 1)
 
         self.settings["save_window_size"] = self.save_win_size_chk.isChecked()
         self.settings["start_minimized_to_tray"] = self.start_tray_chk.isChecked()
@@ -1478,16 +1621,13 @@ class SongPulseWindow(QMainWindow):
         self.settings["gpu_auto_cpu"] = self.gpu_auto_cpu_chk.isChecked()
         self.settings["gpu_threshold"] = self.gpu_thresh_spin.value()
 
-        checked_devs = self.dev_combo.checked_items()
-        all_devs = self.dev_combo.all_items()
-        if all_devs and len(checked_devs) == len(all_devs):
-            self.settings["monitor_all_devices"] = True
-            self.settings["target_devices"] = []
-        else:
-            self.settings["monitor_all_devices"] = False
-            self.settings["target_devices"] = checked_devs
+        remembered_devs = self.audio_outputs_list.get_remembered()
+        checked_devs = self.audio_outputs_list.get_selected()
+        self.settings["remembered_devices"] = remembered_devs
+        self.settings["monitor_all_devices"] = False
+        self.settings["target_devices"] = checked_devs
 
-        self.apply_theme(force=True)
+        self.apply_theme(force=False)
         self._update_gpu_indicator()
         self._refresh_identify_header()
 
@@ -1616,11 +1756,16 @@ class SongPulseWindow(QMainWindow):
         )
 
     def _refresh_devices_dropdown(self):
-        all_devs = list_speakers_safe()
-        self.engine.all_speaker_names = all_devs
-        current_checked = self.dev_combo.checked_items()
-        self.dev_combo.set_items(all_devs, current_checked, monitor_all=False)
-        self._mark_unsaved()
+        connected = list_speakers_safe()
+        self.engine.all_speaker_names = connected
+        added = self.audio_outputs_list.merge_discovered(connected, auto_check_new=True)
+        if added:
+            n = len(added)
+            self.dev_status_lbl.setText(f"Found {n} new output{'s' if n != 1 else ''}")
+            self._mark_unsaved()
+        else:
+            self.dev_status_lbl.setText("No new outputs found")
+        QTimer.singleShot(3000, lambda: self.dev_status_lbl.setText(""))
 
     def _toggle_hotkey_record(self):
         if self.hk_input._recording:
@@ -1991,12 +2136,33 @@ class SongPulseWindow(QMainWindow):
         if self.settings.get("theme", "auto") == "auto":
             self.apply_theme()
         if self.isVisible() and self.pages.currentIndex() == 2:
-            self._update_gpu_indicator()
+            self._refresh_gpu_info_async()
 
     # --- GPU SPEED INDICATOR & BENCHMARK ---
+    def _refresh_gpu_info_async(self):
+        if self._gpu_poll_busy:
+            return
+        self._gpu_poll_busy = True
+
+        def _poll():
+            try:
+                info = get_nvidia_gpu_info()
+            except Exception:
+                info = None
+            self.gpu_info_signal.emit(info)
+
+        threading.Thread(target=_poll, daemon=True).start()
+
+    def _on_gpu_info_ready(self, info):
+        self._gpu_poll_busy = False
+        self._cached_gpu_info = info
+        self._update_gpu_indicator()
+
     def _update_gpu_indicator(self):
+        if not hasattr(self, "gpu_live_lbl"):
+            return
         provider = "GPU Ready (CUDA)" if self.model_mgr.gpu_available else "CPU Only"
-        info = get_nvidia_gpu_info()
+        info = self._cached_gpu_info
         if info:
             thresh = self.gpu_thresh_spin.value() if hasattr(self, "gpu_thresh_spin") else 65
             state = (
@@ -2120,7 +2286,7 @@ class SongPulseWindow(QMainWindow):
     # --- SYSTEM TRAY & WINDOW STATE ---
     def _build_tray(self):
         self.tray = QSystemTrayIcon(self.app_icon, self)
-        self.tray.setToolTip(f"{APP_NAME} v{APP_VERSION} (Background)")
+        self.tray.setToolTip(f"{APP_NAME} (Background)")
 
         menu = QMenu()
         act_open = QAction("Open SongPulse", self)
@@ -2255,51 +2421,86 @@ class SongPulseWindow(QMainWindow):
             else bool(self.settings.get("waveform_idle_dots", False))
         )
         eff_max_w = int(self.settings.get("waveform_max_width", 620))
+        eff_step = float(self.settings.get("waveform_step", 0.0) or 0.0)
+        icon_pref = self.settings.get("icon_color", "theme")
 
-        sig = (
+        # Separate visual stylesheet signature from lightweight waveform & icon signatures
+        theme_sig = (
             theme_key,
             dark,
+            cfg.get("background", {}).get("image", ""),
+            cfg.get("sidebar", {}).get("image", ""),
+        )
+        wf_sig = (
             eff_style,
             eff_mirror,
             eff_idle_dots,
             eff_max_w,
-            cfg.get("background", {}).get("image", ""),
-            cfg.get("sidebar", {}).get("image", ""),
+            eff_step,
+            wf_theme.get("color1", cfg.get("colors", {}).get("accent", "#3B82F6")),
+            wf_theme.get("color2", cfg.get("colors", {}).get("accent_secondary", "#8B5CF6")),
+            bool(wf_theme.get("flip_hz", False)),
+            bool(wf_theme.get("hair_ties", False)),
+            bool(wf_theme.get("right_alt_white", False)),
+            bool(wf_theme.get("teto_bow", False)),
         )
-        if not force and sig == self._last_theme_sig:
+        ic1, ic2 = resolve_icon_colors(icon_pref, cfg)
+        icon_changed = force or (self._last_icon_colors != (ic1, ic2))
+        theme_changed = force or (theme_sig != self._last_theme_sig)
+        wf_changed = force or (wf_sig != self._last_wf_sig)
+
+        if not (theme_changed or wf_changed or icon_changed):
             return
 
-        self._last_theme_sig = sig
         self._current_theme_cfg = cfg
         self.last_dark_state = dark
-
-        self.root_widget.set_background_config(cfg.get("background", {}))
-        self.sidebar.set_sidebar_config(cfg.get("sidebar", {}))
-
         app = QApplication.instance()
-        app.setPalette(build_palette(dark, cfg))
-        app.setStyleSheet(build_stylesheet(dark, self.chevrons, cfg))
-        set_windows_titlebar_theme(int(self.winId()), dark)
 
-        self.pulse_btn.set_dark(dark)
-        self.pulse_btn.configure_waveform(
-            style=eff_style,
-            mirror=eff_mirror,
-            idle_dots=eff_idle_dots,
-            max_width=eff_max_w,
-            color1=wf_theme.get("color1", cfg.get("colors", {}).get("accent", "#3B82F6")),
-            color2=wf_theme.get("color2", cfg.get("colors", {}).get("accent_secondary", "#8B5CF6")),
-            flip_hz=bool(wf_theme.get("flip_hz", False)),
-            hair_ties=bool(wf_theme.get("hair_ties", False)),
-            right_alt_white=bool(wf_theme.get("right_alt_white", False)),
-            teto_bow=bool(wf_theme.get("teto_bow", False)),
-        )
-        self.detail_page.set_theme_dark(dark, theme_cfg=cfg)
-        self.hud.set_theme(dark, cfg)
-        self.song_popup.set_theme(dark, cfg)
-        self._refresh_theme_icons()
-        if self.pages.currentIndex() == 1:
-            self.refresh_library()
+        if theme_changed:
+            self._last_theme_sig = theme_sig
+            self.root_widget.set_background_config(cfg.get("background", {}))
+            self.sidebar.set_sidebar_config(cfg.get("sidebar", {}))
+            app.setPalette(build_palette(dark, cfg))
+            app.setStyleSheet(build_stylesheet(dark, self.chevrons, cfg))
+            set_windows_titlebar_theme(int(self.winId()), dark)
+            self.pulse_btn.set_dark(dark)
+            self.detail_page.set_theme_dark(dark, theme_cfg=cfg)
+            self.hud.set_theme(dark, cfg)
+            self.song_popup.set_theme(dark, cfg)
+            self._refresh_theme_icons()
+            if self.pages.currentIndex() == 1:
+                self.refresh_library()
+
+        if icon_changed:
+            self._last_icon_colors = (ic1, ic2)
+            themed_icon = create_app_icon(ic1, ic2)
+            self.app_icon = themed_icon
+            app.setWindowIcon(themed_icon)
+            self.setWindowIcon(themed_icon)
+            if hasattr(self, "tray"):
+                self.tray.setIcon(themed_icon)
+            if hasattr(self, "brand_icon"):
+                self.brand_icon.setPixmap(create_app_pixmap(24, ic1, ic2))
+            try:
+                export_multi_res_ico(ICON_CACHE_FILE, ic1, ic2)
+            except Exception:
+                pass
+
+        if wf_changed:
+            self._last_wf_sig = wf_sig
+            self.pulse_btn.configure_waveform(
+                style=eff_style,
+                mirror=eff_mirror,
+                idle_dots=eff_idle_dots,
+                max_width=eff_max_w,
+                color1=wf_theme.get("color1", cfg.get("colors", {}).get("accent", "#3B82F6")),
+                color2=wf_theme.get("color2", cfg.get("colors", {}).get("accent_secondary", "#8B5CF6")),
+                flip_hz=bool(wf_theme.get("flip_hz", False)),
+                hair_ties=bool(wf_theme.get("hair_ties", False)),
+                right_alt_white=bool(wf_theme.get("right_alt_white", False)),
+                teto_bow=bool(wf_theme.get("teto_bow", False)),
+                step=eff_step,
+            )
 
     # --- NAVIGATION WITH UNSAVED SETTINGS GUARD ---
     def _set_active_nav(self, idx):
@@ -2388,7 +2589,7 @@ class SongPulseWindow(QMainWindow):
         link_items = []
         for pname, icon_key, url in build_song_platform_links(song):
             icon = self.p_icons.get(icon_key, self.p_icons["web"])
-            link_items.append((pname, icon, lambda _b=None, u=url: webbrowser.open(u)))
+            link_items.append((pname, icon, lambda _b=None, u=url: open_external_url(u)))
 
         copy_url = get_song_link(song)
         link_items.append(

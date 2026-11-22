@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFrame,
     QGraphicsDropShadowEffect,
     QHBoxLayout,
@@ -41,14 +42,16 @@ from PyQt6.QtWidgets import (
     QMenu,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
+    QSlider,
     QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
 from .audio import WAVEFORM_BARS
-from .config import APP_NAME, set_window_always_on_top
+from .config import APP_NAME, open_external_url, set_window_always_on_top
 from .theme import create_app_pixmap, render_blurred_pixmap, rounded_pixmap
 from .workers import build_song_platform_links
 
@@ -141,7 +144,7 @@ class GlassSidebarFrame(QFrame):
 class LoadingSplash(QWidget):
     """Compact startup window shown while SongPulse initializes."""
 
-    def __init__(self, dark: bool = True):
+    def __init__(self, dark: bool = True, icon_colors: tuple[str, str] = ("#3B82F6", "#8B5CF6")):
         super().__init__(
             None,
             Qt.WindowType.SplashScreen
@@ -151,6 +154,7 @@ class LoadingSplash(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setFixedSize(290, 118)
 
+        c1, c2 = icon_colors or ("#3B82F6", "#8B5CF6")
         bg = "#151821" if dark else "#FFFFFF"
         border = "#2D3244" if dark else "#CBD5E1"
         fg = "#F8FAFC" if dark else "#0F172A"
@@ -170,7 +174,7 @@ class LoadingSplash(QWidget):
         top = QHBoxLayout()
         top.setSpacing(12)
         icon_lbl = QLabel()
-        icon_lbl.setPixmap(create_app_pixmap(38))
+        icon_lbl.setPixmap(create_app_pixmap(38, c1, c2))
         icon_lbl.setFixedSize(38, 38)
         icon_lbl.setStyleSheet("border: none; background: transparent;")
 
@@ -198,7 +202,7 @@ class LoadingSplash(QWidget):
         bar.setStyleSheet(
             f"QProgressBar {{ background: {'rgba(255,255,255,0.10)' if dark else 'rgba(15,23,42,0.08)'}; "
             f"border: none; border-radius: 2px; }}"
-            f"QProgressBar::chunk {{ background: #3B82F6; border-radius: 2px; }}"
+            f"QProgressBar::chunk {{ background: {c1}; border-radius: 2px; }}"
         )
         lay.addWidget(bar)
         outer.addWidget(card)
@@ -707,7 +711,7 @@ class HistoryRowCard(QFrame):
             b.setIconSize(QSize(13, 13))
             b.setToolTip(f"Open on {pname}")
             b.setCursor(Qt.CursorShape.PointingHandCursor)
-            b.clicked.connect(lambda checked=False, u=url: webbrowser.open(u))
+            b.clicked.connect(lambda checked=False, u=url: open_external_url(u))
             row.addWidget(b)
             self._link_btns.append((b, pname))
 
@@ -720,7 +724,7 @@ class HistoryRowCard(QFrame):
             m = QMenu(self.more_btn)
             for pname, icon_key, url in all_links[2:]:
                 act = QAction(p_icons.get(icon_key, p_icons["web"]), pname, m)
-                act.triggered.connect(lambda checked=False, u=url: webbrowser.open(u))
+                act.triggered.connect(lambda checked=False, u=url: open_external_url(u))
                 m.addAction(act)
             self.more_btn.setMenu(m)
             row.addWidget(self.more_btn)
@@ -866,6 +870,7 @@ class PulseIdentifyWidget(QWidget):
         self._wf_right_alt_white = False
         self._wf_teto_bow = False
         self._wf_max_width = 620
+        self._wf_step = 0.0
         self._color1 = QColor("#3B82F6")
         self._color2 = QColor("#8B5CF6")
 
@@ -889,6 +894,7 @@ class PulseIdentifyWidget(QWidget):
         hair_ties: bool = False,
         right_alt_white: bool = False,
         teto_bow: bool = False,
+        step: float = 0.0,
     ):
         self._wf_style = (
             style
@@ -901,7 +907,8 @@ class PulseIdentifyWidget(QWidget):
         self._wf_hair_ties = bool(hair_ties)
         self._wf_right_alt_white = bool(right_alt_white)
         self._wf_teto_bow = bool(teto_bow)
-        self._wf_max_width = max(260, min(960, int(max_width or 620)))
+        self._wf_max_width = max(260, min(900, int(max_width or 620)))
+        self._wf_step = max(0.0, min(32.0, float(step or 0.0)))
         self._color1 = QColor(color1 or "#3B82F6")
         self._color2 = QColor(color2 or "#8B5CF6")
         self._apply_geometry_mode()
@@ -1065,6 +1072,10 @@ class PulseIdentifyWidget(QWidget):
         cx = self.width() / 2.0
         cy = self.btn.y() + self.btn.height() / 2.0
 
+        # Subtle outgoing ring pulse from the Listen button whenever audio is playing
+        if self._wf_style != "radial" and not self._scanning and self._audio_active and self._energy > 0.015:
+            self._paint_playing_ring_pulse(p, cx, cy)
+
         if self._wf_style == "horizontal":
             self._paint_horizontal_split(p, cx, cy)
             if self._wf_hair_ties:
@@ -1101,6 +1112,25 @@ class PulseIdentifyWidget(QWidget):
             p.drawEllipse(QPointF(cx, cy), glow_r, glow_r)
 
         p.end()
+
+    def _paint_playing_ring_pulse(self, p: QPainter, cx: float, cy: float):
+        """Paints outgoing ring pulses from the Listen button that taper thinner and fade out cleanly."""
+        strength = max(0.55, min(1.0, self._energy * 4.5)) * self._vis_alpha
+        if strength <= 0.02:
+            return
+        max_travel = 22.5
+        for r_idx in range(2):
+            prog = (self._phase * 0.115 + r_idx * 0.5) % 1.0
+            radius = 66.0 + prog * max_travel
+            alpha = int(((1.0 - prog) ** 1.35) * 215 * strength)
+            if alpha <= 2:
+                continue
+            pen_w = 0.35 + 4.00 * ((1.0 - prog) ** 1.15)
+            r, g, b = self._bar_color(prog * 0.55)
+            ring_color = QColor(r, g, b, max(0, min(255, alpha)))
+            p.setPen(QPen(ring_color, pen_w))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(QPointF(cx, cy), radius, radius)
 
     def _paint_miku_hair_ties(self, p: QPainter, cx: float, cy: float):
         """Draws Miku's thick black-and-pink diamond ponytail ornaments centered right on the left & right sides of the Listen button."""
@@ -1266,9 +1296,14 @@ class PulseIdentifyWidget(QWidget):
         if vis <= 0.01:
             return
 
-        bars = self._effective_bars(self._bar_count)
+        count = (
+            max(12, min(48, int(round(360.0 / self._wf_step))))
+            if self._wf_step >= 4.0
+            else self._bar_count
+        )
+        bars = self._effective_bars(count)
         for i, amp in enumerate(bars):
-            theta = (2.0 * math.pi * i) / self._bar_count - (math.pi / 2.0)
+            theta = (2.0 * math.pi * i) / count - (math.pi / 2.0)
             blend = 0.5 + 0.5 * math.sin(theta + self._phase * 0.35)
             r, g, b = self._bar_color(blend)
 
@@ -1290,12 +1325,12 @@ class PulseIdentifyWidget(QWidget):
             p.drawLine(QPointF(x1, y1), QPointF(x2, y2))
 
     def _paint_horizontal_split(self, p: QPainter, cx: float, cy: float):
-        """Two-way up-down vertical pill bars extending left & right of Listen button (Miku style)."""
+        """Two-way up-down vertical pill bars extending left & right of Listen button."""
         btn_gap = 102.0 if self._wf_hair_ties else 80.0
-        step = 16.0
+        step = self._wf_step if self._wf_step >= 4.0 else 16.0
         usable_w = min(self.width(), self._wf_max_width)
         side_avail = max(0.0, (usable_w / 2.0) - btn_gap - 10.0)
-        bars_per_side = max(0, min(14, int(side_avail // step)))
+        bars_per_side = max(0, min(80, int(side_avail // step)))
         if bars_per_side == 0:
             return
 
@@ -1354,10 +1389,10 @@ class PulseIdentifyWidget(QWidget):
     def _paint_pulse_line(self, p: QPainter, cx: float, cy: float):
         """Continuous stereo L/R zig-zag oscilloscope pulse line flowing from inside Listen button and fading out at outer edges."""
         start_gap = 60.0
-        step = 9.2
+        step = self._wf_step if self._wf_step >= 4.0 else 9.2
         usable_w = min(self.width(), self._wf_max_width)
         side_avail = max(0.0, (usable_w / 2.0) - start_gap - 8.0)
-        peaks_per_side = max(0, min(28, int(side_avail // step)))
+        peaks_per_side = max(0, min(100, int(side_avail // step)))
         if peaks_per_side < 2:
             return
 
@@ -1480,8 +1515,8 @@ class PulseIdentifyWidget(QWidget):
         if vis <= 0.01:
             return
         usable_w = min(self.width() - 24, self._wf_max_width)
-        step = 15.0
-        count = max(6, min(28, int(usable_w // step)))
+        step = self._wf_step if self._wf_step >= 4.0 else 15.0
+        count = max(6, min(120, int(usable_w // step)))
         start_x = cx - ((count - 1) * step) / 2.0
         base_y = self.height() - 26.0
         max_h = 30.0
@@ -1503,9 +1538,14 @@ class PulseIdentifyWidget(QWidget):
         if vis <= 0.01:
             return
         inner_r = 77.0
-        bars = self._effective_bars(self._bar_count)
+        count = (
+            max(12, min(48, int(round(360.0 / self._wf_step))))
+            if self._wf_step >= 4.0
+            else self._bar_count
+        )
+        bars = self._effective_bars(count)
         for i, amp in enumerate(bars):
-            theta = (2.0 * math.pi * i) / self._bar_count - (math.pi / 2.0)
+            theta = (2.0 * math.pi * i) / count - (math.pi / 2.0)
             blend = 0.5 + 0.5 * math.sin(theta + self._phase * 0.35)
             r, g, b = self._bar_color(blend)
             dist = inner_r + amp * 22.0
@@ -1537,6 +1577,163 @@ class NoWheelSpinBox(QSpinBox):
 
     def wheelEvent(self, event):
         event.ignore()
+
+
+class NoWheelDoubleSpinBox(QDoubleSpinBox):
+    """Double spinbox that ignores mouse-wheel scrolling."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+
+class NoWheelSlider(QSlider):
+    """Horizontal slider that ignores mouse-wheel scrolling so Settings scrolls cleanly."""
+
+    def __init__(self, orientation=Qt.Orientation.Horizontal, parent=None):
+        super().__init__(orientation, parent)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+
+class AudioOutputListWidget(QWidget):
+    """Remembered audio outputs list with checkboxes, connection state, and per-device delete buttons."""
+
+    changed = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._remembered: list[str] = []
+        self._selected: set[str] = set()
+        self._connected: set[str] = set()
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(4)
+
+        self._container = QFrame()
+        self._container.setObjectName("SongCard")
+        self._rows_lay = QVBoxLayout(self._container)
+        self._rows_lay.setContentsMargins(8, 6, 8, 6)
+        self._rows_lay.setSpacing(4)
+        outer.addWidget(self._container)
+
+    def set_devices(
+        self,
+        remembered: list[str],
+        selected: list[str],
+        connected: list[str] | set[str],
+        monitor_all: bool = False,
+    ):
+        self._connected = set(connected or [])
+        dedup = []
+        for name in remembered or []:
+            if name and name not in dedup:
+                dedup.append(name)
+        self._remembered = dedup
+        if monitor_all:
+            self._selected = set(dedup)
+        else:
+            self._selected = {d for d in (selected or []) if d in dedup}
+        self._rebuild()
+
+    def merge_discovered(self, connected: list[str], auto_check_new: bool = True) -> list[str]:
+        """Updates live connection state and appends any connected outputs not yet remembered."""
+        self._connected = set(connected or [])
+        added = []
+        for name in connected or []:
+            if name and name not in self._remembered:
+                self._remembered.append(name)
+                if auto_check_new:
+                    self._selected.add(name)
+                added.append(name)
+        self._rebuild()
+        return added
+
+    def get_remembered(self) -> list[str]:
+        return list(self._remembered)
+
+    def get_selected(self) -> list[str]:
+        return [d for d in self._remembered if d in self._selected]
+
+    def _on_toggle(self, name: str, checked: bool):
+        if checked:
+            self._selected.add(name)
+        else:
+            self._selected.discard(name)
+        self.changed.emit()
+
+    def _on_delete(self, name: str):
+        self._remembered = [d for d in self._remembered if d != name]
+        self._selected.discard(name)
+        self._rebuild()
+        self.changed.emit()
+
+    def _rebuild(self):
+        while self._rows_lay.count():
+            it = self._rows_lay.takeAt(0)
+            if it and it.widget():
+                it.widget().deleteLater()
+
+        if not self._remembered:
+            empty = QLabel("No audio outputs remembered. Click Refresh to find connected outputs.")
+            empty.setObjectName("Muted")
+            empty.setWordWrap(True)
+            empty.setStyleSheet("font-size: 11px; padding: 6px 4px;")
+            self._rows_lay.addWidget(empty)
+            return
+
+        for name in self._remembered:
+            row_w = QWidget()
+            rl = QHBoxLayout(row_w)
+            rl.setContentsMargins(2, 2, 2, 2)
+            rl.setSpacing(8)
+
+            chk = QCheckBox()
+            chk.setChecked(name in self._selected)
+            chk.setCursor(Qt.CursorShape.PointingHandCursor)
+            chk.toggled.connect(lambda state, n=name: self._on_toggle(n, state))
+            rl.addWidget(chk)
+
+            is_conn = name in self._connected
+            dot = QLabel("●")
+            dot.setFixedWidth(12)
+            dot.setStyleSheet(
+                f"color: {'#22C55E' if is_conn else '#71717A'}; font-size: 9px; background: transparent;"
+            )
+            dot.setToolTip("Connected" if is_conn else "Disconnected (remembered)")
+            rl.addWidget(dot)
+
+            lbl = ElidedLabel(name)
+            lbl.setStyleSheet(
+                "font-size: 12px; font-weight: 500;"
+                if is_conn
+                else "font-size: 12px; color: #94A3B8;"
+            )
+            rl.addWidget(lbl, 1)
+
+            if not is_conn:
+                tag = QLabel("Offline")
+                tag.setObjectName("Muted")
+                tag.setStyleSheet(
+                    "font-size: 10px; padding: 1px 6px; border-radius: 4px; background: rgba(148, 163, 184, 0.14);"
+                )
+                rl.addWidget(tag)
+
+            del_btn = QPushButton("✕")
+            del_btn.setObjectName("IconDangerBtn")
+            del_btn.setFixedSize(24, 24)
+            del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            del_btn.setToolTip(f"Remove '{name}' from remembered outputs")
+            del_btn.clicked.connect(lambda _c=False, n=name: self._on_delete(n))
+            rl.addWidget(del_btn)
+
+            self._rows_lay.addWidget(row_w)
 
 
 class CheckableComboBox(NoWheelComboBox):
@@ -1952,7 +2149,7 @@ class SongResultPopup(QWidget):
 
     def _on_open(self):
         if self._open_url:
-            webbrowser.open(self._open_url)
+            open_external_url(self._open_url)
         self.hide_timer.stop()
         self.hide()
 

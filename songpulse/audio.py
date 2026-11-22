@@ -1,6 +1,7 @@
 from collections import deque
 import ctypes
 import threading
+import time
 import warnings
 
 import numpy as np
@@ -54,7 +55,9 @@ class AudioBufferEngine:
         self.device_rms = {}
         self.device_bands = {}
         self.device_bands_lr = {}
+        self.device_last_ts = {}
         self.monitored_names = []
+        self.active_connected_names = set()
         self.all_speaker_names = []
         self._stop_event = threading.Event()
         self._threads = []
@@ -81,6 +84,14 @@ class AudioBufferEngine:
                     with lock:
                         buf.clear()
 
+    def _clear_device_state(self, dev_name):
+        zeros = np.zeros(WAVEFORM_BARS, dtype=np.float32)
+        self.device_rms[dev_name] = 0.0
+        self.device_bands[dev_name] = zeros
+        self.device_bands_lr[dev_name] = (zeros, zeros)
+        self.device_last_ts[dev_name] = 0.0
+        self.active_connected_names.discard(dev_name)
+
     def start(self):
         self.stop()
         self._stop_event = threading.Event()
@@ -89,23 +100,34 @@ class AudioBufferEngine:
         self.device_rms.clear()
         self.device_bands.clear()
         self.device_bands_lr.clear()
+        self.device_last_ts.clear()
         self.monitored_names.clear()
+        self.active_connected_names.clear()
 
         self.all_speaker_names = list_speakers_safe()
+        to_monitor = []
         for name in self.all_speaker_names:
-            should_monitor = self.monitor_all or (name in self.target_devices)
-            if should_monitor:
-                self.monitored_names.append(name)
-                self.buffers[name] = deque(maxlen=self._max_chunks())
-                self.locks[name] = threading.Lock()
-                self.device_rms[name] = 0.0
-                t = threading.Thread(
-                    target=self._loopback_worker,
-                    args=(name, self._stop_event),
-                    daemon=True,
-                )
-                t.start()
-                self._threads.append(t)
+            if self.monitor_all or (name in self.target_devices):
+                if name not in to_monitor:
+                    to_monitor.append(name)
+        # Also keep standby watchers for remembered checked devices (e.g. Bluetooth headphones) so they auto-resume on reconnect
+        if not self.monitor_all:
+            for name in self.target_devices:
+                if name and name not in to_monitor:
+                    to_monitor.append(name)
+
+        for name in to_monitor:
+            self.monitored_names.append(name)
+            self.buffers[name] = deque(maxlen=self._max_chunks())
+            self.locks[name] = threading.Lock()
+            self._clear_device_state(name)
+            t = threading.Thread(
+                target=self._loopback_worker,
+                args=(name, self._stop_event),
+                daemon=True,
+            )
+            t.start()
+            self._threads.append(t)
 
     def reconfigure(self, target_devices, monitor_all, buffer_seconds, enable_buffer=None):
         self.target_devices = list(target_devices or [])
@@ -121,6 +143,8 @@ class AudioBufferEngine:
         self.device_rms.clear()
         self.device_bands.clear()
         self.device_bands_lr.clear()
+        self.device_last_ts.clear()
+        self.active_connected_names.clear()
 
     def get_live_waveform(self, bar_count=WAVEFORM_BARS):
         """Returns independent spectrum bands and RMS, or all zeros if silent/no output selected."""
@@ -128,26 +152,36 @@ class AudioBufferEngine:
         return combined, rms
 
     def get_live_waveform_stereo(self, bar_count=WAVEFORM_BARS):
-        """Returns (combined_bands, left_bands, right_bands, rms) with near-zero overhead."""
+        """Returns (combined_bands, left_bands, right_bands, rms) with stale-device cutoff so disconnects go silent immediately."""
         if not self.monitored_names or not self.device_rms:
             zeros = [0.0] * bar_count
             return zeros, zeros, zeros, 0.0
 
-        max_rms = max(self.device_rms.values(), default=0.0)
-        if max_rms < 0.0008:
-            zeros = [0.0] * bar_count
-            return zeros, zeros, zeros, 0.0
-
-        rms = min(1.0, max_rms * 10.0)
+        now = time.monotonic()
+        max_rms = 0.0
         comb_l = np.zeros(bar_count, dtype=np.float32)
         comb_r = np.zeros(bar_count, dtype=np.float32)
-        for pair in list(self.device_bands_lr.values()):
+
+        for dev_name in list(self.monitored_names):
+            last_ts = self.device_last_ts.get(dev_name, 0.0)
+            if last_ts <= 0.0 or (now - last_ts) > 0.45:
+                continue
+            d_rms = self.device_rms.get(dev_name, 0.0)
+            if d_rms > max_rms:
+                max_rms = d_rms
+            pair = self.device_bands_lr.get(dev_name)
             if pair is not None:
                 bl, br = pair
                 if bl is not None and len(bl) == bar_count:
                     comb_l = np.maximum(comb_l, bl)
                 if br is not None and len(br) == bar_count:
                     comb_r = np.maximum(comb_r, br)
+
+        if max_rms < 0.0008:
+            zeros = [0.0] * bar_count
+            return zeros, zeros, zeros, 0.0
+
+        rms = min(1.0, max_rms * 10.0)
         combined = np.maximum(comb_l, comb_r)
         return combined.tolist(), comb_l.tolist(), comb_r.tolist(), rms
 
@@ -166,8 +200,16 @@ class AudioBufferEngine:
             try:
                 mic = sc.get_microphone(id=str(dev_name), include_loopback=True)
                 with mic.recorder(samplerate=SAMPLE_RATE, channels=2) as recorder:
+                    self.active_connected_names.add(dev_name)
                     while not stop_evt.is_set():
                         data = recorder.record(numframes=CHUNK_FRAMES)
+                        if data is None or data.size == 0:
+                            self._clear_device_state(dev_name)
+                            break
+
+                        if not np.all(np.isfinite(data)):
+                            data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
+
                         # Only retain PCM chunks in RAM when rolling buffer OR active live listen is enabled
                         if self.enable_buffer or self._live_capture_active:
                             lock = self.locks.get(dev_name)
@@ -188,6 +230,7 @@ class AudioBufferEngine:
                             rms_r = float(np.sqrt(np.mean(right * right)))
                             rms = max(rms_l, rms_r)
                             self.device_rms[dev_name] = rms
+                            self.device_last_ts[dev_name] = time.monotonic()
 
                             n_in = len(left)
                             if n_in >= _FFT_SIZE:
@@ -236,9 +279,14 @@ class AudioBufferEngine:
                                 self.device_bands_lr[dev_name] = (zeros, zeros)
                                 self.device_bands[dev_name] = zeros
                         except Exception:
-                            pass
+                            self._clear_device_state(dev_name)
             except Exception:
+                self._clear_device_state(dev_name)
+                fft_ring_lr.fill(0.0)
                 stop_evt.wait(2.0)
+            finally:
+                self._clear_device_state(dev_name)
+                fft_ring_lr.fill(0.0)
 
     def dump_recent_to_wav(self, out_path, seconds=None):
         if not self.monitored_names:

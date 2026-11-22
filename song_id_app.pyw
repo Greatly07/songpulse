@@ -25,7 +25,8 @@ from songpulse.config import (
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import QApplication
 
-from songpulse.theme import create_app_icon, export_multi_res_ico
+from songpulse.theme import create_app_icon, export_multi_res_ico, resolve_icon_colors
+from songpulse.themes_manager import load_theme_config
 from songpulse.widgets import LoadingSplash
 
 
@@ -74,21 +75,26 @@ def main():
     )
 
     # Show sleek startup loading card while SongPulse initializes
+    theme_pref = saved_cfg.get("theme", "auto")
+    sys_dark = is_windows_dark_mode()
+    init_theme_cfg = load_theme_config(theme_pref, sys_dark)
+    ic1, ic2 = resolve_icon_colors(saved_cfg.get("icon_color", "theme"), init_theme_cfg)
+
     splash = None
     if not start_tray:
-        theme_pref = saved_cfg.get("theme", "auto")
-        splash_dark = is_windows_dark_mode() if theme_pref == "auto" else (theme_pref != "light")
-        splash = LoadingSplash(dark=splash_dark)
+        splash = LoadingSplash(
+            dark=bool(init_theme_cfg.get("base_dark", True)),
+            icon_colors=(ic1, ic2),
+        )
         splash.show()
         app.processEvents()
 
-    if not os.path.exists(ICON_CACHE_FILE):
-        try:
-            export_multi_res_ico(ICON_CACHE_FILE)
-        except Exception:
-            pass
+    try:
+        export_multi_res_ico(ICON_CACHE_FILE, ic1, ic2)
+    except Exception:
+        pass
 
-    app_icon = create_app_icon()
+    app_icon = create_app_icon(ic1, ic2)
     app.setWindowIcon(app_icon)
 
     QLocalServer.removeServer(SINGLE_INSTANCE_KEY)

@@ -1,12 +1,16 @@
 import ctypes
+import datetime
 import importlib.util
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import threading
 import urllib.parse
+import urllib.request
+import webbrowser
 import winreg
 import winsound
 
@@ -15,7 +19,7 @@ import soundfile as sf
 
 # --- APP METADATA & PATHS ---
 APP_NAME = "SongPulse"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 APP_USER_MODEL_ID = f"Greatly07.SongPulse.{APP_VERSION}"
 GITHUB_REPO = "Greatly07/songpulse"
 YTDLP_GITHUB_REPO = "Greatly07/yt-dlp-downloader"
@@ -207,12 +211,25 @@ PREFERRED_INFO_SITES = [
     ("deezer", "Deezer"),
 ]
 
+ICON_COLOR_PRESETS = [
+    ("theme", "Match Active Theme", None, None),
+    ("default", "Blue / Purple (Default)", "#3B82F6", "#8B5CF6"),
+    ("miku", "Miku Cyan / Sky", "#39C5BB", "#38BDF8"),
+    ("teto", "Teto Crimson / Rose", "#E11D48", "#FB7185"),
+    ("emerald", "Emerald / Teal", "#10B981", "#06B6D4"),
+    ("amber", "Amber / Orange", "#F59E0B", "#EA580C"),
+    ("sakura", "Sakura Pink / Violet", "#EC4899", "#A855F7"),
+    ("mono", "Monochrome Slate", "#52525B", "#18181B"),
+]
+
 DEFAULT_SETTINGS = {
     "theme": "auto",  # "auto", "dark", "light", "miku", "teto", or "custom:<id>"
+    "icon_color": "theme",  # "theme" or a preset id from ICON_COLOR_PRESETS
     "waveform_style": "auto",  # "auto", "radial", "horizontal", "pulse_line", "bar", "dots"
     "waveform_mirror": False,
     "waveform_idle_dots": False,
     "waveform_max_width": 620,
+    "waveform_step": 0.0,  # 0.0 = Auto (style default), else custom spacing in px
     "preferred_info_site": "auto",
     "hotkey": "ctrl+alt+s",
     "hotkey_mode": "live",  # "buffer" or "live"
@@ -235,6 +252,7 @@ DEFAULT_SETTINGS = {
     "auto_copy": False,
     "monitor_all_devices": True,
     "target_devices": [],
+    "remembered_devices": [],
     "gpu_auto_cpu": True,
     "gpu_threshold": 65,
     "ytdlp_app_path": "",
@@ -261,7 +279,207 @@ def load_settings():
         data.get("ai_model", UVR_MODEL_NAME)
     ):
         data["use_ai_separation"] = False
+
+    rem = list(data.get("remembered_devices") or [])
+    for d in data.get("target_devices") or []:
+        if d and d not in rem:
+            rem.append(d)
+    data["remembered_devices"] = rem
     return data
+
+
+def is_ytmdesktop_installed() -> bool:
+    """Checks whether YTMDesktop (ytmd:// protocol) is installed and available on Windows."""
+    for root, subkey in (
+        (winreg.HKEY_CURRENT_USER, r"Software\Classes\ytmd\shell\open\command"),
+        (winreg.HKEY_CLASSES_ROOT, r"ytmd\shell\open\command"),
+    ):
+        try:
+            with winreg.OpenKey(root, subkey) as key:
+                cmd, _ = winreg.QueryValueEx(key, "")
+            cmd = str(cmd or "").strip()
+            if not cmd:
+                continue
+            try:
+                parts = shlex.split(cmd, posix=False)
+                exe = parts[0].strip('"') if parts else ""
+            except Exception:
+                exe = cmd.split('"')[1] if '"' in cmd else cmd.split()[0]
+            if exe:
+                try:
+                    st = os.stat(exe)
+                    if st.st_size > 0:
+                        return True
+                except PermissionError:
+                    return True
+                except OSError:
+                    continue
+        except OSError:
+            continue
+    return False
+
+
+def _extract_ytm_song_video_id(node) -> tuple[str, str]:
+    """Recursively extracts (atv_song_video_id, first_video_id) from a YouTube Music InnerTube JSON tree."""
+    atv_id = ""
+    first_id = ""
+
+    def _walk(obj):
+        nonlocal atv_id, first_id
+        if atv_id:
+            return
+        if isinstance(obj, dict):
+            vid = obj.get("videoId")
+            if isinstance(vid, str) and len(vid) == 11:
+                if not first_id:
+                    first_id = vid
+                vtype = (
+                    obj.get("watchEndpointMusicSupportedConfigs", {})
+                    .get("watchEndpointMusicConfig", {})
+                    .get("musicVideoType", "")
+                )
+                if vtype == "MUSIC_VIDEO_TYPE_ATV":
+                    atv_id = vid
+                    return
+            for v in obj.values():
+                _walk(v)
+                if atv_id:
+                    return
+        elif isinstance(obj, list):
+            for item in obj:
+                _walk(item)
+                if atv_id:
+                    return
+
+    _walk(node)
+    return atv_id, first_id
+
+
+def _resolve_ytm_song_video_id(query_text: str) -> str:
+    """Resolves the audio-only Song (ATV / Art Track) videoId on YouTube Music instead of the music video."""
+    q = (query_text or "").strip()
+    if not q:
+        return ""
+
+    # 1. Query YouTube Music's own InnerTube search filtered strictly to Songs (prefers MUSIC_VIDEO_TYPE_ATV)
+    try:
+        client_ver = f"1.{datetime.datetime.now().strftime('%Y%m%d')}.01.00"
+        payload = json.dumps(
+            {
+                "context": {
+                    "client": {
+                        "clientName": "WEB_REMIX",
+                        "clientVersion": client_ver,
+                        "hl": "en",
+                        "gl": "US",
+                    }
+                },
+                "query": q,
+                "params": "EgWKAQIIAWoMEAMQBBAJEAoQBRAV",
+            }
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            "https://music.youtube.com/youtubei/v1/search?prettyPrint=false",
+            data=payload,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+                "Content-Type": "application/json",
+                "Origin": "https://music.youtube.com",
+                "Referer": "https://music.youtube.com/",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="ignore"))
+        atv_id, first_id = _extract_ytm_song_video_id(data)
+        if atv_id:
+            return atv_id
+        if first_id:
+            return first_id
+    except Exception:
+        pass
+
+    # 2. Fallback: look for auto-generated Topic / Art Track on YouTube, then generic search
+    for suffix in (' "Provided to YouTube"', ""):
+        search_url = (
+            f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(q + suffix)}"
+        )
+        try:
+            req = urllib.request.Request(
+                search_url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    "Accept-Language": "en-US,en;q=0.9",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=4) as resp:
+                html_body = resp.read().decode("utf-8", errors="ignore")
+            m = re.search(r'"videoId":"([A-Za-z0-9_-]{11})"', html_body)
+            if m:
+                return m.group(1)
+        except Exception:
+            pass
+    return ""
+
+
+def _to_ytmdesktop_play_uri(url: str) -> str:
+    """Returns a direct ytmd://play/<videoId> URI when URL already contains a YouTube video ID."""
+    try:
+        parsed = urllib.parse.urlparse(url)
+        host = (parsed.netloc or "").lower()
+        if "music.youtube.com" not in host:
+            return ""
+        path = (parsed.path or "").lstrip("/")
+        if path == "watch":
+            qs = urllib.parse.parse_qs(parsed.query or "")
+            vid = (qs.get("v") or [""])[0]
+            if vid:
+                pl = (qs.get("list") or [""])[0]
+                return f"ytmd://play/{vid}/{pl}" if pl else f"ytmd://play/{vid}"
+    except Exception:
+        pass
+    return ""
+
+
+def open_external_url(url: str, prefer_ytmd: bool = True):
+    """Opens YT Music song links in YTMDesktop (audio-only Song track) when installed, else web browser."""
+    if not url:
+        return
+    if prefer_ytmd:
+        try:
+            parsed = urllib.parse.urlparse(url)
+            host = (parsed.netloc or "").lower()
+        except Exception:
+            host = ""
+
+        if "music.youtube.com" in host and is_ytmdesktop_installed():
+            direct_uri = _to_ytmdesktop_play_uri(url)
+            if direct_uri:
+                try:
+                    os.startfile(direct_uri)
+                    return
+                except OSError:
+                    pass
+
+            path = (parsed.path or "").lstrip("/")
+            if path == "search":
+                qs = urllib.parse.parse_qs(parsed.query or "")
+                q_val = (qs.get("q") or [""])[0]
+                if q_val:
+                    def _open_resolved():
+                        vid = _resolve_ytm_song_video_id(q_val)
+                        if vid:
+                            try:
+                                os.startfile(f"ytmd://play/{vid}")
+                                return
+                            except OSError:
+                                pass
+                        webbrowser.open(url)
+
+                    threading.Thread(target=_open_resolved, daemon=True).start()
+                    return
+
+    webbrowser.open(url)
 
 
 def save_settings(settings):

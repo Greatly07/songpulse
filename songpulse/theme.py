@@ -17,10 +17,28 @@ from PyQt6.QtGui import (
     QPolygonF,
 )
 
-from .config import ICONS_DIR, resolve_cover_path
+from .config import ICON_COLOR_PRESETS, ICONS_DIR, resolve_cover_path
 
 
-def create_app_pixmap(size=64):
+def resolve_icon_colors(icon_color_key: str = "theme", theme_cfg: dict | None = None) -> tuple[str, str]:
+    """Resolves (color1, color2) for the SongPulse app icon based on user preference or active theme."""
+    key = (icon_color_key or "theme").strip().lower()
+    if key != "theme":
+        for pid, _lbl, c1, c2 in ICON_COLOR_PRESETS:
+            if pid == key and c1 and c2:
+                return c1, c2
+    if theme_cfg:
+        t_id = (theme_cfg.get("id") or "").lower()
+        cols = theme_cfg.get("colors", {})
+        if t_id not in ("dark", "light", "auto") and cols.get("accent"):
+            return (
+                cols.get("accent", "#3B82F6"),
+                cols.get("accent_secondary", cols.get("accent", "#8B5CF6")),
+            )
+    return "#3B82F6", "#8B5CF6"
+
+
+def create_app_pixmap(size=64, color1="#3B82F6", color2="#8B5CF6"):
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
@@ -28,8 +46,8 @@ def create_app_pixmap(size=64):
 
     pad = max(1, size // 28)
     grad = QLinearGradient(0, 0, size, size)
-    grad.setColorAt(0.0, QColor("#3B82F6"))
-    grad.setColorAt(1.0, QColor("#8B5CF6"))
+    grad.setColorAt(0.0, QColor(color1 or "#3B82F6"))
+    grad.setColorAt(1.0, QColor(color2 or "#8B5CF6"))
     painter.setBrush(QBrush(grad))
     painter.setPen(Qt.PenStyle.NoPen)
     painter.drawEllipse(pad, pad, size - pad * 2, size - pad * 2)
@@ -55,18 +73,18 @@ def create_app_pixmap(size=64):
     return pixmap
 
 
-def create_app_icon():
+def create_app_icon(color1="#3B82F6", color2="#8B5CF6"):
     icon = QIcon()
     for sz in (16, 24, 32, 48, 64, 128, 256):
-        icon.addPixmap(create_app_pixmap(sz))
+        icon.addPixmap(create_app_pixmap(sz, color1, color2))
     return icon
 
 
-def export_multi_res_ico(out_path):
+def export_multi_res_ico(out_path, color1="#3B82F6", color2="#8B5CF6"):
     sizes = [16, 24, 32, 48, 64, 128, 256]
     frames = []
     for sz in sizes:
-        pix = create_app_pixmap(sz)
+        pix = create_app_pixmap(sz, color1, color2)
         ba = QByteArray()
         buf = QBuffer(ba)
         buf.open(QIODevice.OpenModeFlag.WriteOnly)

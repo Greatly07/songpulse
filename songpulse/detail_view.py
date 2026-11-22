@@ -43,7 +43,7 @@ try:
 except Exception:
     HAS_MULTIMEDIA = False
 
-from .config import TEMP_DIR, build_site_url, find_default_ytdlp_app, split_artists
+from .config import TEMP_DIR, build_site_url, find_default_ytdlp_app, open_external_url, split_artists
 from .dialogs import prompt_install_or_locate_ytdlp
 from .theme import create_ui_icon, extract_cover_gradient_colors, rounded_pixmap
 from .widgets import ElidedLabel, ElidedLinkButton, FlowWidget, get_song_link
@@ -957,7 +957,7 @@ class SongDetailPage(QWidget):
             btn.setIconSize(QSize(13, 13))
             btn.setStyleSheet(self._glass_btn_qss)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.clicked.connect(lambda checked=False, u=url: webbrowser.open(u))
+            btn.clicked.connect(lambda checked=False, u=url: open_external_url(u))
             self.platforms_flow.addWidget(btn)
 
         copy_btn = QPushButton("Copy Link")
@@ -1120,7 +1120,7 @@ class SongDetailPage(QWidget):
             f"QPushButton:hover {{ color: {self._link_hex}; text-decoration: underline; }}"
         )
         title_btn.setToolTip(f"Open {title_text}")
-        title_btn.clicked.connect(lambda: webbrowser.open(url) if url else None)
+        title_btn.clicked.connect(lambda: open_external_url(url, prefer_ytmd=False) if url else None)
         meta_col.addWidget(title_btn)
 
         stats_parts = []
