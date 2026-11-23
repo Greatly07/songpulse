@@ -1877,7 +1877,7 @@ class AudioOutputListWidget(QWidget):
                 it.widget().deleteLater()
 
         if not self._remembered:
-            empty = QLabel("No audio outputs remembered. Click Refresh to find connected outputs.")
+            empty = QLabel("No audio outputs remembered. Click Scan to find connected outputs.")
             empty.setObjectName("Muted")
             empty.setWordWrap(True)
             empty.setStyleSheet("font-size: 11px; padding: 6px 4px;")
@@ -2003,7 +2003,7 @@ class CheckableComboBox(NoWheelComboBox):
         checked = self.checked_items()
         total = self.model().rowCount()
         if total == 0:
-            text = "No audio outputs found (click Refresh)"
+            text = "No audio outputs found (click Scan)"
         elif not checked:
             text = "None selected (no audio will be captured)"
         elif len(checked) == total:

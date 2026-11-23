@@ -1,5 +1,6 @@
 import io
 import os
+import re
 import struct
 
 from PyQt6.QtCore import QBuffer, QByteArray, QIODevice, QPointF, QRectF, Qt
@@ -663,7 +664,43 @@ def build_palette(dark: bool, theme_cfg: dict | None = None) -> QPalette:
     return pal
 
 
-def build_stylesheet(dark: bool, chevrons: dict, theme_cfg: dict | None = None):
+_FONT_SIZE_RE = re.compile(r"font-size\s*:\s*(\d+(?:\.\d+)?)px")
+
+
+def scale_qss_fonts(qss: str, scale: float) -> str:
+    """Scales all `font-size: Npx` declarations in a QSS string by `scale`."""
+    if not qss or abs(scale - 1.0) < 0.01:
+        return qss
+
+    def _repl(match):
+        val = float(match.group(1))
+        scaled = max(9, int(round(val * scale)))
+        return f"font-size: {scaled}px"
+
+    return _FONT_SIZE_RE.sub(_repl, qss)
+
+
+def apply_font_scale_to_widget_tree(root, scale: float):
+    """Scales inline widget stylesheets containing `font-size` without compounding."""
+    if root is None:
+        return
+    from PyQt6.QtWidgets import QWidget
+
+    widgets = [root] + root.findChildren(QWidget)
+    for w in widgets:
+        base_qss = w.property("_base_qss")
+        cur_qss = w.styleSheet() or ""
+        if base_qss is None:
+            if "font-size" not in cur_qss:
+                continue
+            base_qss = cur_qss
+            w.setProperty("_base_qss", base_qss)
+        target = scale_qss_fonts(base_qss, scale)
+        if cur_qss != target:
+            w.setStyleSheet(target)
+
+
+def build_stylesheet(dark: bool, chevrons: dict, theme_cfg: dict | None = None, font_scale: float = 1.0):
     dn = chevrons["down_dark.png"] if dark else chevrons["down_light.png"]
     up = chevrons["up_dark.png"] if dark else chevrons["up_light.png"]
 
@@ -709,7 +746,8 @@ def build_stylesheet(dark: bool, chevrons: dict, theme_cfg: dict | None = None):
             "help_fg": tc.get("muted", "#A1A1AA"),
             "help_b": "rgba(255, 255, 255, 0.16)",
             "menu_bg": "#181C26",
-            "scroll_h": "rgba(255, 255, 255, 0.22)",
+            "scroll_h": "rgba(210, 214, 220, 0.34)",
+            "scroll_h_hover": "rgba(225, 229, 235, 0.56)",
             "song_hover_bg": "rgba(255, 255, 255, 0.08)",
             "song_hover_b": accent,
         }
@@ -751,7 +789,8 @@ def build_stylesheet(dark: bool, chevrons: dict, theme_cfg: dict | None = None):
             "help_fg": "#334155",
             "help_b": "#C2CCDC",
             "menu_bg": "#FFFFFF",
-            "scroll_h": "#BCC6D6",
+            "scroll_h": "rgba(128, 134, 145, 0.38)",
+            "scroll_h_hover": "rgba(95, 99, 104, 0.62)",
             "song_hover_bg": "rgba(37, 99, 235, 0.06)",
             "song_hover_b": accent,
         }
@@ -759,7 +798,7 @@ def build_stylesheet(dark: bool, chevrons: dict, theme_cfg: dict | None = None):
     ac_col = QColor(accent)
     ac_text = "#0B1220" if _perceived_luminance((ac_col.red(), ac_col.green(), ac_col.blue())) > 175 else "#FFFFFF"
 
-    return f"""
+    qss = f"""
 QMainWindow {{
     background-color: {c['bg']};
     color: {c['fg']};
@@ -1176,13 +1215,44 @@ QProgressBar::chunk {{
 QScrollBar:vertical {{
     background: transparent;
     width: 8px;
+    margin: 2px 0px;
+    border: none;
 }}
 QScrollBar::handle:vertical {{
     background: {c['scroll_h']};
     border-radius: 4px;
-    min-height: 24px;
+    min-height: 32px;
+}}
+QScrollBar::handle:vertical:hover {{
+    background: {c['scroll_h_hover']};
 }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
     height: 0px;
+    background: none;
+}}
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+    background: none;
+}}
+QScrollBar:horizontal {{
+    background: transparent;
+    height: 8px;
+    margin: 0px 2px;
+    border: none;
+}}
+QScrollBar::handle:horizontal {{
+    background: {c['scroll_h']};
+    border-radius: 4px;
+    min-width: 32px;
+}}
+QScrollBar::handle:horizontal:hover {{
+    background: {c['scroll_h_hover']};
+}}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+    width: 0px;
+    background: none;
+}}
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+    background: none;
 }}
 """
+    return scale_qss_fonts(qss, font_scale)

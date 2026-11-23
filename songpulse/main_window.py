@@ -17,7 +17,7 @@ from PyQt6.QtCore import (
     QVariantAnimation,
     pyqtSignal,
 )
-from PyQt6.QtGui import QAction, QIcon
+from PyQt6.QtGui import QAction, QFont, QIcon
 from PyQt6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -36,6 +36,7 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QStackedWidget,
+    QStyle,
     QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
@@ -54,6 +55,7 @@ from .config import (
     MODELS_DIR,
     PREFERRED_INFO_SITES,
     SAVED_CLIP_WAV,
+    TEXT_SIZE_PRESETS,
     THEMES_DIR,
     UVR_MODEL_NAME,
     build_site_url,
@@ -64,6 +66,7 @@ from .config import (
     get_model_file_path,
     get_nvidia_gpu_info,
     get_storage_breakdown,
+    get_text_scale,
     is_ai_engine_installed,
     is_model_downloaded,
     is_model_ready,
@@ -96,6 +99,7 @@ from .dialogs import (
     prompt_install_or_locate_ytdlp,
 )
 from .theme import (
+    apply_font_scale_to_widget_tree,
     build_palette,
     build_stylesheet,
     create_app_icon,
@@ -1069,6 +1073,23 @@ class SongPulseWindow(QMainWindow):
         icon_row.addWidget(self.icon_color_combo)
         app_lay.addLayout(icon_row)
 
+        text_sz_row = QHBoxLayout()
+        text_sz_row.setSpacing(8)
+        text_sz_row.addLayout(
+            _label_with_help(
+                "Text Size",
+                "Scales interface text across SongPulse for easier reading.",
+            )
+        )
+        text_sz_row.addStretch()
+        self.text_size_combo = NoWheelComboBox()
+        self.text_size_combo.setMinimumWidth(190)
+        for tid, tlbl, _scale in TEXT_SIZE_PRESETS:
+            self.text_size_combo.addItem(tlbl, tid)
+        self.text_size_combo.currentIndexChanged.connect(self._mark_unsaved)
+        text_sz_row.addWidget(self.text_size_combo)
+        app_lay.addLayout(text_sz_row)
+
         wf_row = QHBoxLayout()
         wf_row.setSpacing(8)
         wf_row.addWidget(QLabel("Waveform Shape"))
@@ -1298,10 +1319,15 @@ class SongPulseWindow(QMainWindow):
         aud_lay.addWidget(sec3)
 
         dev_hdr = QHBoxLayout()
-        dev_hdr.addLayout(
-            _label_with_help(
-                "Remembered Audio Outputs",
-                "Check the speakers/headphones SongPulse should listen to. Disconnected outputs stay remembered until you remove them; Refresh scans for new outputs.",
+        dev_hdr.setSpacing(6)
+        self.audio_outputs_collapse_btn = QPushButton("▶  Remembered Audio Outputs")
+        self.audio_outputs_collapse_btn.setObjectName("CollapseBtn")
+        self.audio_outputs_collapse_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.audio_outputs_collapse_btn.clicked.connect(self._toggle_audio_outputs_section)
+        dev_hdr.addWidget(self.audio_outputs_collapse_btn)
+        dev_hdr.addWidget(
+            HelpBadge(
+                "Check the speakers/headphones SongPulse should listen to. Disconnected outputs stay remembered until you remove them; Scan checks for new outputs."
             )
         )
         dev_hdr.addStretch()
@@ -1309,17 +1335,19 @@ class SongPulseWindow(QMainWindow):
         self.dev_status_lbl.setObjectName("Muted")
         self.dev_status_lbl.setStyleSheet("font-size: 11px;")
         dev_hdr.addWidget(self.dev_status_lbl)
-        ref_btn = QPushButton("Refresh")
-        ref_btn.setObjectName("PlatformBtn")
-        ref_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        ref_btn.setToolTip("Scan for newly connected audio outputs")
-        ref_btn.clicked.connect(self._refresh_devices_dropdown)
-        dev_hdr.addWidget(ref_btn)
+        scan_btn = QPushButton("Scan")
+        scan_btn.setObjectName("PlatformBtn")
+        scan_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        scan_btn.setToolTip("Scan for newly connected audio outputs")
+        scan_btn.clicked.connect(self._refresh_devices_dropdown)
+        dev_hdr.addWidget(scan_btn)
         aud_lay.addLayout(dev_hdr)
 
         self.audio_outputs_list = AudioOutputListWidget()
         self.audio_outputs_list.changed.connect(self._mark_unsaved)
+        self.audio_outputs_list.changed.connect(self._update_audio_outputs_collapse_header)
         aud_lay.addWidget(self.audio_outputs_list)
+        self._set_audio_outputs_expanded(False)
 
         self.enable_buf_chk = QCheckBox(
             "Keep recent audio buffer in RAM (disable to save RAM; Listen Live still works)"
@@ -1572,6 +1600,23 @@ class SongPulseWindow(QMainWindow):
         self._populate_settings_ui()
         return page
 
+    def _set_audio_outputs_expanded(self, expanded: bool):
+        self._audio_outputs_expanded = bool(expanded)
+        self.audio_outputs_list.setVisible(self._audio_outputs_expanded)
+        self._update_audio_outputs_collapse_header()
+
+    def _toggle_audio_outputs_section(self):
+        self._set_audio_outputs_expanded(not self._audio_outputs_expanded)
+
+    def _update_audio_outputs_collapse_header(self):
+        if not hasattr(self, "audio_outputs_collapse_btn"):
+            return
+        arrow = "▼" if getattr(self, "_audio_outputs_expanded", False) else "▶"
+        n_sel = len(self.audio_outputs_list.get_selected()) if hasattr(self, "audio_outputs_list") else 0
+        self.audio_outputs_collapse_btn.setText(
+            f"{arrow}  Remembered Audio Outputs  •  {n_sel} active"
+        )
+
     def _set_ai_section_expanded(self, expanded: bool):
         self._ai_section_expanded = bool(expanded)
         self.ai_body_widget.setVisible(self._ai_section_expanded)
@@ -1648,6 +1693,12 @@ class SongPulseWindow(QMainWindow):
                     self.icon_color_combo.setCurrentIndex(idx)
                     break
 
+            ts_pref = self.settings.get("text_size", "small")
+            for idx in range(self.text_size_combo.count()):
+                if self.text_size_combo.itemData(idx) == ts_pref:
+                    self.text_size_combo.setCurrentIndex(idx)
+                    break
+
             wf_map = {"auto": 0, "radial": 1, "horizontal": 2, "pulse_line": 3, "bar": 4, "dots": 5}
             self.wf_style_combo.setCurrentIndex(
                 wf_map.get(self.settings.get("waveform_style", "auto"), 0)
@@ -1717,6 +1768,7 @@ class SongPulseWindow(QMainWindow):
                 connected_devs,
                 monitor_all=bool(self.settings.get("monitor_all_devices", True)),
             )
+            self._update_audio_outputs_collapse_header()
             self.dev_status_lbl.setText("")
             self.has_unsaved_settings = False
             self.unsaved_lbl.setText("")
@@ -1749,6 +1801,7 @@ class SongPulseWindow(QMainWindow):
 
         self.settings["theme"] = self.theme_combo.currentData() or "auto"
         self.settings["icon_color"] = self.icon_color_combo.currentData() or "theme"
+        self.settings["text_size"] = self.text_size_combo.currentData() or "small"
         wf_styles = ["auto", "radial", "horizontal", "pulse_line", "bar", "dots"]
         self.settings["waveform_style"] = wf_styles[max(0, self.wf_style_combo.currentIndex())]
         self.settings["waveform_mirror"] = self.wf_mirror_chk.isChecked()
@@ -1916,6 +1969,7 @@ class SongPulseWindow(QMainWindow):
         connected = list_speakers_safe()
         self.engine.all_speaker_names = connected
         added = self.audio_outputs_list.merge_discovered(connected, auto_check_new=True)
+        self._update_audio_outputs_collapse_header()
         if added:
             n = len(added)
             self.dev_status_lbl.setText(f"Found {n} new output{'s' if n != 1 else ''}")
@@ -2421,7 +2475,10 @@ class SongPulseWindow(QMainWindow):
             )
             box = QMessageBox(self)
             box.setWindowTitle("Update Available")
-            box.setIcon(QMessageBox.Icon.Information)
+            box.setIcon(QMessageBox.Icon.NoIcon)
+            box.setIconPixmap(
+                self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxInformation).pixmap(36, 36)
+            )
             box.setText(f"SongPulse v{latest} is available!")
             if info["notes"]:
                 box.setInformativeText(info["notes"][:450])
@@ -2454,7 +2511,14 @@ class SongPulseWindow(QMainWindow):
         if dlg.succeeded:
             self.quit_app(force=True)
         elif not dlg.was_cancelled and dlg.error_msg:
-            QMessageBox.warning(self, "Update Failed", dlg.error_msg)
+            err_box = QMessageBox(self)
+            err_box.setWindowTitle("Update Failed")
+            err_box.setIcon(QMessageBox.Icon.NoIcon)
+            err_box.setIconPixmap(
+                self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxWarning).pixmap(36, 36)
+            )
+            err_box.setText(dlg.error_msg)
+            err_box.exec()
 
     def _on_update_error(self, err):
         self.upd_btn.setEnabled(True)
@@ -2607,6 +2671,7 @@ class SongPulseWindow(QMainWindow):
         eff_max_w = int(self.settings.get("waveform_max_width", 620))
         eff_step = float(self.settings.get("waveform_step", 0.0) or 0.0)
         icon_pref = self.settings.get("icon_color", "theme")
+        font_scale = get_text_scale(self.settings.get("text_size", "small"))
 
         # Separate visual stylesheet signature from lightweight waveform & icon signatures
         theme_sig = (
@@ -2614,6 +2679,7 @@ class SongPulseWindow(QMainWindow):
             dark,
             cfg.get("background", {}).get("image", ""),
             cfg.get("sidebar", {}).get("image", ""),
+            font_scale,
         )
         wf_sig = (
             eff_style,
@@ -2642,15 +2708,22 @@ class SongPulseWindow(QMainWindow):
 
         if theme_changed:
             self._last_theme_sig = theme_sig
+            self._active_font_scale = font_scale
             self.root_widget.set_background_config(cfg.get("background", {}))
             self.sidebar.set_sidebar_config(cfg.get("sidebar", {}))
+            app.setFont(QFont("Segoe UI", max(9, int(round(10 * font_scale)))))
             app.setPalette(build_palette(dark, cfg))
-            app.setStyleSheet(build_stylesheet(dark, self.chevrons, cfg))
+            app.setStyleSheet(build_stylesheet(dark, self.chevrons, cfg, font_scale=font_scale))
             set_windows_titlebar_theme(int(self.winId()), dark)
             self.pulse_btn.set_dark(dark)
             self.detail_page.set_theme_dark(dark, theme_cfg=cfg)
             self.hud.set_theme(dark, cfg)
             self.song_popup.set_theme(dark, cfg)
+            apply_font_scale_to_widget_tree(self, font_scale)
+            apply_font_scale_to_widget_tree(self.hud, font_scale)
+            apply_font_scale_to_widget_tree(self.song_popup, font_scale)
+            if hasattr(self, "mini_window"):
+                apply_font_scale_to_widget_tree(self.mini_window, font_scale)
             self._refresh_theme_icons()
             if self.pages.currentIndex() == 1:
                 self.refresh_library()
@@ -3536,11 +3609,20 @@ class SongPulseWindow(QMainWindow):
             self._lib_cards.append(card)
 
         self._update_batch_ui()
+        font_scale = getattr(self, "_active_font_scale", 1.0)
+        if abs(font_scale - 1.0) >= 0.01:
+            for i in range(self.lib_list_layout.count()):
+                w = self.lib_list_layout.itemAt(i).widget()
+                if w is not None:
+                    apply_font_scale_to_widget_tree(w, font_scale)
 
     def _open_song_details(self, song):
         self.detail_page.load_song(
             song, dark=bool(self.last_dark_state), theme_cfg=self._current_theme_cfg
         )
+        font_scale = getattr(self, "_active_font_scale", 1.0)
+        if abs(font_scale - 1.0) >= 0.01:
+            apply_font_scale_to_widget_tree(self.detail_page, font_scale)
         self.pages.setCurrentIndex(3)
         for i, btn in enumerate(self.nav_buttons):
             btn.setProperty("active", i == 1)

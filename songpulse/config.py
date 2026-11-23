@@ -223,9 +223,26 @@ ICON_COLOR_PRESETS = [
     ("mono", "Monochrome Slate", "#52525B", "#18181B"),
 ]
 
+TEXT_SIZE_PRESETS = [
+    ("small", "Small (Default)", 1.0),
+    ("medium", "Medium (115%)", 1.15),
+    ("large", "Large (130%)", 1.30),
+    ("xlarge", "Extra Large (145%)", 1.45),
+]
+
+
+def get_text_scale(text_size_key: str) -> float:
+    key = (text_size_key or "small").strip().lower()
+    for pid, _lbl, scale in TEXT_SIZE_PRESETS:
+        if pid == key:
+            return scale
+    return 1.0
+
+
 DEFAULT_SETTINGS = {
     "theme": "auto",  # "auto", "dark", "light", "miku", "teto", or "custom:<id>"
     "icon_color": "theme",  # "theme" or a preset id from ICON_COLOR_PRESETS
+    "text_size": "small",  # "small", "medium", "large", "xlarge"
     "waveform_style": "auto",  # "auto", "radial", "horizontal", "pulse_line", "bar", "dots"
     "waveform_mirror": False,
     "waveform_idle_dots": False,

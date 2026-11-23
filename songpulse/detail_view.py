@@ -435,6 +435,13 @@ def show_download_complete_popup(parent, saved_folder: str, count: int = 1, play
     close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
     close_btn.clicked.connect(dlg.accept)
 
+    open_btn.ensurePolished()
+    close_btn.ensurePolished()
+    btn_w = max(open_btn.sizeHint().width(), close_btn.sizeHint().width(), 108)
+    btn_h = max(open_btn.sizeHint().height(), close_btn.sizeHint().height(), 34)
+    open_btn.setFixedSize(btn_w, btn_h)
+    close_btn.setFixedSize(btn_w, btn_h)
+
     btn_row.addWidget(open_btn)
     btn_row.addWidget(close_btn)
     lay.addLayout(btn_row)
