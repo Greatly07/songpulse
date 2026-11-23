@@ -878,7 +878,7 @@ def register_uri_protocol():
                 pyw = exe[:-10] + "pythonw.exe"
                 if os.path.exists(pyw):
                     exe = pyw
-            entry = os.path.join(APP_DIR, "song_id_app.pyw")
+            entry = os.path.join(APP_DIR, "songpulse_app.pyw")
             cmd = f'"{exe}" "{entry}" "%1"'
 
         base_key = r"Software\Classes\songpulse"
@@ -970,7 +970,7 @@ def set_startup_enabled(enable: bool):
                     pyw = exe[:-10] + "pythonw.exe"
                     if os.path.exists(pyw):
                         exe = pyw
-                entry = os.path.join(APP_DIR, "song_id_app.pyw")
+                entry = os.path.join(APP_DIR, "songpulse_app.pyw")
                 cmd = f'"{exe}" "{entry}" --tray'
             winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, cmd)
         else:

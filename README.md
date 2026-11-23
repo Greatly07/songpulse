@@ -86,5 +86,5 @@ A lightweight Windows desktop music identifier that listens directly to your PC'
    ```
 5. Launch the app:
    ```bash
-   python song_id_app.pyw
+   python songpulse_app.pyw
    ```

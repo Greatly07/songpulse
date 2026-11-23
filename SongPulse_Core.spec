@@ -45,7 +45,7 @@ excludes = [
 ]
 
 a = Analysis(
-    ['song_id_app.pyw'],
+    ['songpulse_app.pyw'],
     pathex=[],
     binaries=binaries,
     datas=datas,

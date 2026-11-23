@@ -21,7 +21,7 @@ for pkg in ('audio_separator', 'librosa', 'torchvision', 'shazamio', 'shazamio_c
     hiddenimports += tmp_ret[2]
 
 a = Analysis(
-    ['song_id_app.pyw'],
+    ['songpulse_app.pyw'],
     pathex=[],
     binaries=binaries,
     datas=datas,

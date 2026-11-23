@@ -12,7 +12,7 @@ if exist "dist" (
 )
 
 echo [1/5] Generating songpulse.ico...
-python song_id_app.pyw --make-icon
+python songpulse_app.pyw --make-icon
 if errorlevel 1 (
   echo Icon generation failed!
   pause
