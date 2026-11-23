@@ -1,5 +1,8 @@
+import base64
 import ctypes
+import ctypes.wintypes
 import html
+import json
 import os
 import re
 import subprocess
@@ -23,6 +26,7 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import (
     QApplication,
+    QDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -53,6 +57,7 @@ from .workers import (
     SongDetailEnrichWorker,
     build_song_platform_links,
     resolve_youtube_watch_url,
+    resolve_ytdlp_download_url,
 )
 
 
@@ -246,10 +251,254 @@ def _find_window_by_title_hint(hint: str):
     return found[0] if found else None
 
 
-def _launch_and_autopaste_ytdlp(exe_path: str, url: str):
-    """Launches yt-dlp downloader, passes the URL arg, and sends Ctrl+V."""
-    before = _get_visible_hwnds()
+def _get_process_tree_names(root_pid: int) -> list[tuple[int, str]]:
+    """Returns [(pid, exe_name_lower)] for all descendant processes of root_pid on Windows."""
+    if os.name != "nt" or not root_pid:
+        return []
+
+    class PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", ctypes.wintypes.DWORD),
+            ("cntUsage", ctypes.wintypes.DWORD),
+            ("th32ProcessID", ctypes.wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", ctypes.wintypes.DWORD),
+            ("cntThreads", ctypes.wintypes.DWORD),
+            ("th32ParentProcessID", ctypes.wintypes.DWORD),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", ctypes.wintypes.DWORD),
+            ("szExeFile", ctypes.c_wchar * 260),
+        ]
+
+    children_map: dict[int, list[tuple[int, str]]] = {}
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateToolhelp32Snapshot.argtypes = [ctypes.wintypes.DWORD, ctypes.wintypes.DWORD]
+    kernel32.CreateToolhelp32Snapshot.restype = ctypes.wintypes.HANDLE
+    kernel32.Process32FirstW.argtypes = [ctypes.wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+    kernel32.Process32FirstW.restype = ctypes.wintypes.BOOL
+    kernel32.Process32NextW.argtypes = [ctypes.wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+    kernel32.Process32NextW.restype = ctypes.wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [ctypes.wintypes.HANDLE]
+    kernel32.CloseHandle.restype = ctypes.wintypes.BOOL
+
+    snap = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
+    if not snap or snap == ctypes.wintypes.HANDLE(-1).value:
+        return []
+    try:
+        entry = PROCESSENTRY32W()
+        entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+        if kernel32.Process32FirstW(snap, ctypes.byref(entry)):
+            while True:
+                pid = int(entry.th32ProcessID)
+                ppid = int(entry.th32ParentProcessID)
+                name = str(entry.szExeFile or "").lower()
+                children_map.setdefault(ppid, []).append((pid, name))
+                if not kernel32.Process32NextW(snap, ctypes.byref(entry)):
+                    break
+    except Exception:
+        pass
+    finally:
+        kernel32.CloseHandle(snap)
+
+    result = []
+    stack = [root_pid]
+    visited = {root_pid}
+    while stack:
+        cur = stack.pop()
+        for c_pid, c_name in children_map.get(cur, ()):
+            if c_pid not in visited:
+                visited.add(c_pid)
+                result.append((c_pid, c_name))
+                stack.append(c_pid)
+    return result
+
+
+def _close_windows_for_pids(target_pids: set[int]):
+    """Sends WM_CLOSE to all top-level windows belonging to any PID in target_pids."""
+    if os.name != "nt" or not target_pids:
+        return
+    try:
+        user32 = ctypes.windll.user32
+        WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+        hwnds = []
+
+        def _cb(hwnd, _lp):
+            pid = ctypes.wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if int(pid.value) in target_pids and user32.IsWindowVisible(hwnd):
+                hwnds.append(int(hwnd))
+            return True
+
+        user32.EnumWindows(WNDENUMPROC(_cb), 0)
+        for hw in hwnds:
+            user32.PostMessageW(hw, 0x0010, 0, 0)  # WM_CLOSE
+    except Exception:
+        pass
+
+
+def _read_ytdlp_history_info(work_dir: str | None) -> tuple[int, str]:
+    """Returns (history_entry_count, latest_filepath) from yt_dlp_history.json."""
+    if not work_dir:
+        return 0, ""
+    hist_path = os.path.join(work_dir, "yt_dlp_history.json")
+    if not os.path.isfile(hist_path):
+        return 0, ""
+    try:
+        with open(hist_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list) and data:
+            latest_fp = str((data[0] or {}).get("filepath") or "").strip()
+            return len(data), latest_fp
+        return 0, ""
+    except Exception:
+        return 0, ""
+
+
+def _resolve_saved_folder(work_dir: str | None, latest_filepath: str, playlist_name: str = "") -> str:
+    """Determines the folder where yt-dlp Downloader saved the downloaded files."""
+    if latest_filepath:
+        parent = os.path.dirname(latest_filepath)
+        if parent and os.path.isdir(parent):
+            return os.path.normpath(parent)
+    if work_dir:
+        settings_path = os.path.join(work_dir, "yt_dlp_settings.json")
+        if os.path.isfile(settings_path):
+            try:
+                with open(settings_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                base_dir = str((data or {}).get("save_dir") or "").strip()
+                if base_dir:
+                    if playlist_name:
+                        cand = os.path.join(base_dir, playlist_name)
+                        if os.path.isdir(cand):
+                            return os.path.normpath(cand)
+                    if os.path.isdir(base_dir):
+                        return os.path.normpath(base_dir)
+            except Exception:
+                pass
+    return os.path.normpath(os.path.join(os.path.expanduser("~"), "Downloads"))
+
+
+def show_download_complete_popup(parent, saved_folder: str, count: int = 1, playlist_name: str = ""):
+    """Shows a compact popup telling the user where downloads were saved with Open Folder and Close buttons."""
+    dlg = QDialog(parent)
+    dlg.setWindowTitle("Download Complete")
+    dlg.setModal(False)
+    dlg.setMinimumWidth(380)
+    dlg.setMaximumWidth(480)
+
+    lay = QVBoxLayout(dlg)
+    lay.setContentsMargins(18, 16, 18, 16)
+    lay.setSpacing(10)
+
+    if playlist_name:
+        hdr_txt = f"Playlist '{playlist_name}' downloaded ({count} track{'s' if count != 1 else ''})"
+    elif count > 1:
+        hdr_txt = f"Downloaded {count} tracks"
+    else:
+        hdr_txt = "Download complete!"
+
+    hdr = QLabel(hdr_txt)
+    hdr.setStyleSheet("font-size: 14px; font-weight: 700;")
+    hdr.setWordWrap(True)
+    lay.addWidget(hdr)
+
+    sub = QLabel(f"Saved to:\n{saved_folder}")
+    sub.setObjectName("Muted")
+    sub.setWordWrap(True)
+    sub.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+    sub.setStyleSheet("font-size: 12px;")
+    lay.addWidget(sub)
+
+    btn_row = QHBoxLayout()
+    btn_row.setSpacing(8)
+    btn_row.addStretch()
+
+    open_btn = QPushButton("Open Folder")
+    open_btn.setObjectName("PrimaryBtn")
+    open_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def _on_open_folder():
+        if saved_folder and os.path.isdir(saved_folder):
+            os.startfile(saved_folder)
+        dlg.accept()
+
+    open_btn.clicked.connect(_on_open_folder)
+
+    close_btn = QPushButton("Close")
+    close_btn.setObjectName("PlatformBtn")
+    close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+    close_btn.clicked.connect(dlg.accept)
+
+    btn_row.addWidget(open_btn)
+    btn_row.addWidget(close_btn)
+    lay.addLayout(btn_row)
+
+    dlg.show()
+    dlg.raise_()
+    dlg.activateWindow()
+
+
+def _ensure_no_batch_folder_setting(work_dir: str | None):
+    """Ensures yt-dlp-downloader does not reuse an old playlist subfolder setting for batch/single downloads."""
+    if not work_dir:
+        return
+    settings_path = os.path.join(work_dir, "yt_dlp_settings.json")
+    if not os.path.isfile(settings_path):
+        return
+    try:
+        with open(settings_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and (
+            data.get("playlist_folder")
+            or data.get("batch_as_playlist")
+            or data.get("playlist_numbering")
+        ):
+            data["playlist_folder"] = False
+            data["batch_as_playlist"] = False
+            data["playlist_numbering"] = False
+            with open(settings_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+    except Exception:
+        pass
+
+
+def launch_ytdlp_downloader(
+    exe_path: str,
+    urls: list[str],
+    playlist_name: str = "",
+    quick_mp3: bool = True,
+    on_complete_cb=None,
+):
+    """Launches yt-dlp Downloader via its ytdlp:// URI schema with Music or Playlist preset."""
+    clean_urls = [u.strip() for u in (urls or []) if u and u.strip()]
+    if not clean_urls:
+        return
+
     work_dir = os.path.dirname(exe_path) or None
+    if not playlist_name:
+        _ensure_no_batch_folder_setting(work_dir)
+
+    payload: dict = {"urls": clean_urls}
+    if playlist_name:
+        payload["playlist"] = playlist_name
+    b64_data = (
+        base64.urlsafe_b64encode(json.dumps(payload).encode("utf-8"))
+        .decode("ascii")
+        .rstrip("=")
+    )
+    preset_param = "playlist" if playlist_name else "music"
+    autostart_param = "1" if quick_mp3 else "0"
+    if playlist_name:
+        uri = (
+            f"ytdlp://batch?preset={preset_param}"
+            f"&playlist={urllib.parse.quote_plus(playlist_name)}"
+            f"&autostart={autostart_param}&data={b64_data}"
+        )
+    else:
+        uri = f"ytdlp://batch?preset={preset_param}&autostart={autostart_param}&data={b64_data}"
+
+    init_hist_count, _ = _read_ytdlp_history_info(work_dir)
 
     if exe_path.lower().endswith((".py", ".pyw")):
         py_exe = sys.executable
@@ -257,34 +506,72 @@ def _launch_and_autopaste_ytdlp(exe_path: str, url: str):
             pyw = py_exe[:-10] + "pythonw.exe"
             if os.path.exists(pyw):
                 py_exe = pyw
-        subprocess.Popen([py_exe, exe_path, url], cwd=work_dir)
+        proc = subprocess.Popen([py_exe, exe_path, uri], cwd=work_dir)
     else:
-        subprocess.Popen([exe_path, url], cwd=work_dir)
+        proc = subprocess.Popen([exe_path, uri], cwd=work_dir)
 
-    def _paste_worker():
-        target_hwnd = None
-        deadline = time.monotonic() + 8.0
-        while time.monotonic() < deadline:
-            time.sleep(0.25)
-            new_hwnds = _get_visible_hwnds() - before
-            if new_hwnds:
-                target_hwnd = next(iter(new_hwnds))
-                break
+    if quick_mp3:
+        def _autoclose_worker():
+            expected = len(clean_urls)
+            seen_ytdlp_pids: set[int] = set()
+            app_pids: set[int] = {proc.pid}
+            idle_since: float | None = None
+            deadline = time.monotonic() + 1800.0
+            while proc.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.5)
+                descendants = _get_process_tree_names(proc.pid)
+                active_dl = False
+                for c_pid, c_name in descendants:
+                    if c_name == "yt-dlp.exe":
+                        seen_ytdlp_pids.add(c_pid)
+                        active_dl = True
+                    elif c_name in ("ffmpeg.exe", "ffprobe.exe"):
+                        active_dl = True
+                    elif c_name in ("yt_dlp_app.exe", "python.exe", "pythonw.exe"):
+                        app_pids.add(c_pid)
 
-        if not target_hwnd:
-            base_hint = os.path.splitext(os.path.basename(exe_path))[0]
-            target_hwnd = _find_window_by_title_hint(base_hint)
+                if active_dl:
+                    idle_since = None
+                    continue
 
-        if target_hwnd:
-            time.sleep(0.9)
-            _force_focus_window(target_hwnd)
-            time.sleep(0.25)
-            try:
-                keyboard.send("ctrl+v")
-            except Exception:
-                pass
+                cur_hist_count, latest_fp = _read_ytdlp_history_info(work_dir)
+                hist_delta = cur_hist_count - init_hist_count
+                if hist_delta < expected and len(seen_ytdlp_pids) < expected:
+                    continue
 
-    threading.Thread(target=_paste_worker, daemon=True).start()
+                if idle_since is None:
+                    idle_since = time.monotonic()
+                elif time.monotonic() - idle_since >= 1.0:
+                    hist_exists = os.path.isfile(os.path.join(work_dir or "", "yt_dlp_history.json"))
+                    # Only auto-close if all tracks succeeded; if any failed, leave it open for retry.
+                    if hist_delta >= expected or not hist_exists:
+                        _close_windows_for_pids(app_pids)
+                        try:
+                            proc.wait(timeout=2.0)
+                        except subprocess.TimeoutExpired:
+                            try:
+                                if os.name == "nt":
+                                    subprocess.run(
+                                        ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                                        stdout=subprocess.DEVNULL,
+                                        stderr=subprocess.DEVNULL,
+                                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
+                                    )
+                                else:
+                                    proc.terminate()
+                            except Exception:
+                                pass
+                        if on_complete_cb:
+                            saved_dir = _resolve_saved_folder(work_dir, latest_fp, playlist_name)
+                            on_complete_cb(saved_dir, expected, playlist_name)
+                    break
+
+        threading.Thread(target=_autoclose_worker, daemon=True).start()
+
+
+def _launch_and_autopaste_ytdlp(exe_path: str, url: str):
+    """Compatibility wrapper that launches yt-dlp Downloader for a single URL."""
+    launch_ytdlp_downloader(exe_path, [url], playlist_name="", quick_mp3=True)
 
 
 class _InfoPopupBackdrop(QWidget):
@@ -329,9 +616,11 @@ class SongDetailPage(QWidget):
     song_updated = pyqtSignal(str, dict)
     ytdlp_path_changed = pyqtSignal(str)
     like_toggled = pyqtSignal(str)
+    ytdlp_download_finished = pyqtSignal(str, int, str)
 
     def __init__(self, p_icons: dict, get_settings_fn, parent=None):
         super().__init__(parent)
+        self.ytdlp_download_finished.connect(self._on_ytdlp_download_finished)
         self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
         self.p_icons = p_icons
         self.get_settings = get_settings_fn
@@ -1440,30 +1729,39 @@ class SongDetailPage(QWidget):
                 exe_path = chosen
                 self.ytdlp_path_changed.emit(exe_path)
 
-        url = self.song.get("youtube_video_url") or ""
-        if not url:
-            self.ytdlp_status_lbl.setText("Finding direct YouTube link...")
-            QApplication.processEvents()
-            url = resolve_youtube_watch_url(
-                self.song.get("artist", ""), self.song.get("title", "")
-            )
-            if url:
-                self.song["youtube_video_url"] = url
-                self.song_updated.emit(self.song.get("id", ""), {"youtube_video_url": url})
-            else:
-                url = self.song.get("youtube_url") or ""
+        self.ytdlp_status_lbl.setText("Finding audio-only YouTube link...")
+        QApplication.processEvents()
+        url, updates = resolve_ytdlp_download_url(self.song)
+        if updates:
+            self.song_updated.emit(self.song.get("id", ""), updates)
 
         if not url:
+            self.ytdlp_status_lbl.setText("")
             QMessageBox.warning(self, "No Link Found", "Could not find a YouTube link for this song.")
             return
 
+        quick_mp3 = bool(settings.get("ytdlp_quick_download_mp3", True))
         QApplication.clipboard().setText(url)
         try:
-            _launch_and_autopaste_ytdlp(exe_path, url)
-            self.ytdlp_status_lbl.setText("Opened yt-dlp Downloader & pasted YouTube link!")
+            launch_ytdlp_downloader(
+                exe_path,
+                [url],
+                playlist_name="",
+                quick_mp3=quick_mp3,
+                on_complete_cb=lambda folder, cnt, pl: self.ytdlp_download_finished.emit(folder, cnt, pl),
+            )
+            self.ytdlp_status_lbl.setText(
+                "Quick-downloading MP3 with yt-dlp Downloader..."
+                if quick_mp3
+                else "Opened yt-dlp Downloader with Music preset!"
+            )
             QTimer.singleShot(4500, lambda: self.ytdlp_status_lbl.setText(""))
         except Exception as e:
+            self.ytdlp_status_lbl.setText("")
             QMessageBox.warning(self, "Launch Failed", f"Could not open yt-dlp Downloader:\n{e}")
+
+    def _on_ytdlp_download_finished(self, saved_folder: str, count: int, playlist_name: str):
+        show_download_complete_popup(self.window(), saved_folder, count, playlist_name)
 
     def _on_back(self):
         self.stop_audio()

@@ -6,20 +6,23 @@ A lightweight Windows desktop music identifier that listens directly to your PC'
 
 ---
 
-## Features (v1.1.1)
+## Features (v1.2.0)
 
 - **Multi-Output Desktop Audio Capture:** Listens directly to one or more Windows playback devices simultaneously via WASAPI loopback without needing a microphone or virtual audio cables. Includes an option to disable the rolling RAM buffer when you only want Listen Live.
-- **Two Listening Modes:**
+- **Two Listening Modes + Mini Window & Saved Clip Testing:**
   - **Listen (Live):** Continuously monitors playing audio with non-blocking probes and instant cancellation. Also supports your selected local AI rescue model when enabled.
-  - **Identify Last (Rolling Buffer):** Keeps the last 5 to 30 seconds of desktop audio in RAM so you can identify a track you just heard immediately.
+  - **Identify Last (Rolling Buffer):** Keeps the last 5 to 30 seconds of desktop audio in RAM so you can identify a track you just heard immediately, or **Save Last Xs** to test a captured clip against multiple AI models without losing the audio.
+  - **Mini Window:** Compact always-on-top mini window with live waveforms, Listen, Identify Last, and AI Rescue toggle.
 - **Optional Tricky-Track Local AI Rescue (Saves Space):**
   - Core SongPulse installs with **no AI engine or models downloaded by default**.
   - Choose from curated tricky-track rescue models in **Settings -> AI Models** (or during Setup): **De-Reverb HQ**, **UVR De-Echo & De-Reverb**, **UVR DeNoise (SFX & Static)**, **UVR Crowd Remover**, **Whisper Lyrics Rescue (Tiny / Base)** for sped-up, slowed+reverb, and covers, **UVR Inst HQ 3**, or import your own custom `.onnx` / `.pth` / `.ckpt` model.
   - Built-in speed/pitch rescue sweep for sped-up and slowed tracks, plus smart GPU load guard with automatic CPU fallback.
-- **Reworked Library & Playlists:**
+- **Reworked Library, Playlists & yt-dlp Integration:**
   - Switch between **Identified Songs**, **Liked Songs**, and unlimited **Custom Playlists**.
   - Reorder custom playlists manually via drag-and-drop or move arrows, or sort by Date, Title, Artist, Genre, or Album.
-  - Multi-select checkboxes and **Select All** with top-right **Add to Playlist**, **Batch Download (yt-dlp)**, and **Clear Selected** actions.
+  - **Download Playlist:** One-click button to download the active playlist into a new subfolder named after the playlist via `yt-dlp-downloader`.
+  - Multi-select checkboxes and **Select All** with top-right **Add to Playlist**, **Batch Download (yt-dlp)** (preserving the exact order songs were selected, without creating a new subfolder), and **Clear Selected** actions.
+  - **Quick MP3 Download (Default ON):** Automatically launches `yt-dlp-downloader` via `ytdlp://` URI with the Music preset (preferring audio-only YouTube Music song links first and falling back to video if unavailable) and closes it automatically once downloads finish.
 
   <img width="480" alt="History Tab" src="https://github.com/user-attachments/assets/f6aa6dd2-60ef-4520-ac0a-a928f3d085f2" /><img width="480" alt="Liked Tab" src="https://github.com/user-attachments/assets/f32a99be-6440-460e-87a6-f9d51a47ce89" />
 
@@ -61,7 +64,7 @@ A lightweight Windows desktop music identifier that listens directly to your PC'
 
 ### Option 1: Windows Installer (Recommended)
 
-1. Download `SongPulse_Setup_v1.1.1.exe` from the [Releases](https://github.com/Greatly07/songpulse/releases/latest) page.
+1. Download `SongPulse_Setup_v1.2.0.exe` from the [Releases](https://github.com/Greatly07/songpulse/releases/latest) page.
 2. Run the installer (installs per-user to `%LOCALAPPDATA%\Programs\SongPulse`; no admin rights required).
 3. Choose **Compact installation** (Core only, smallest footprint) or **Custom installation** to optionally include the AI Engine and models.
 4. Launch **SongPulse** from your Start Menu.

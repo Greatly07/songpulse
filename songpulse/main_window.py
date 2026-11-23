@@ -82,7 +82,12 @@ from .config import (
     set_window_always_on_top,
     set_windows_titlebar_theme,
 )
-from .detail_view import SongDetailPage, _force_focus_window, _launch_and_autopaste_ytdlp
+from .detail_view import (
+    SongDetailPage,
+    _force_focus_window,
+    launch_ytdlp_downloader,
+    show_download_complete_popup,
+)
 from .dialogs import (
     CustomThemeDialog,
     DownloadProgressDialog,
@@ -139,6 +144,7 @@ from .workers import (
     UpdateCheckWorker,
     build_song_platform_links,
     resolve_youtube_watch_url,
+    resolve_ytdlp_download_url,
 )
 
 
@@ -167,6 +173,7 @@ def _label_with_help(text: str, tip: str):
 class SongPulseWindow(QMainWindow):
     hotkey_signal = pyqtSignal()
     gpu_info_signal = pyqtSignal(object)
+    ytdlp_download_finished = pyqtSignal(str, int, str)
 
     SIDEBAR_EXPANDED_W = 204
     SIDEBAR_COLLAPSED_W = 62
@@ -189,7 +196,7 @@ class SongPulseWindow(QMainWindow):
         self.history = load_history()
         self.playlists = load_playlists()
         self.active_playlist_key = "all"  # "all", "liked", or playlist_id
-        self.selected_song_ids = set()
+        self.selected_song_ids: list[str] = []
         self._lib_cards = []
         self._ai_section_expanded = False
 
@@ -285,6 +292,7 @@ class SongPulseWindow(QMainWindow):
 
         self.hotkey_signal.connect(self._on_hotkey_triggered)
         self.gpu_info_signal.connect(self._on_gpu_info_ready)
+        self.ytdlp_download_finished.connect(self._on_ytdlp_download_finished)
         self._register_hotkey(self.settings.get("hotkey", "ctrl+alt+s"))
 
         self.wave_timer = QTimer(self)
@@ -869,6 +877,14 @@ class SongPulseWindow(QMainWindow):
         self.lib_sort_combo.setCurrentIndex(1)
         self.lib_sort_combo.currentIndexChanged.connect(self._on_library_sort_changed)
 
+        self.pl_download_btn = QPushButton("Download Playlist")
+        self.pl_download_btn.setObjectName("PlatformBtn")
+        self.pl_download_btn.setToolTip(
+            "Download this playlist into a new folder with the playlist name using yt-dlp Downloader"
+        )
+        self.pl_download_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.pl_download_btn.clicked.connect(self._download_active_playlist)
+
         self.pl_rename_btn = QPushButton("Rename")
         self.pl_rename_btn.setObjectName("PlatformBtn")
         self.pl_rename_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -883,6 +899,7 @@ class SongPulseWindow(QMainWindow):
 
         ctrl_row.addWidget(self.search_input, 1)
         ctrl_row.addWidget(self.lib_sort_combo)
+        ctrl_row.addWidget(self.pl_download_btn)
         ctrl_row.addWidget(self.pl_rename_btn)
         ctrl_row.addWidget(self.pl_del_btn)
         layout.addLayout(ctrl_row)
@@ -1211,6 +1228,12 @@ class SongPulseWindow(QMainWindow):
         yt_row.addWidget(yt_find_btn)
         yt_row.addWidget(yt_browse_btn)
         sys_lay.addLayout(yt_row)
+
+        self.ytdlp_quick_mp3_chk = QCheckBox(
+            "Quickly download MP3 with yt-dlp Downloader Music preset (auto-opens and closes after downloading)"
+        )
+        self.ytdlp_quick_mp3_chk.stateChanged.connect(self._mark_unsaved)
+        sys_lay.addWidget(self.ytdlp_quick_mp3_chk)
         layout.addWidget(sys_card)
 
         # 3. Audio & Timing
@@ -1649,6 +1672,9 @@ class SongPulseWindow(QMainWindow):
             self.unsaved_lbl.setText("")
             self.discard_changes_btn.hide()
             self.ytdlp_path_input.setText(self.settings.get("ytdlp_app_path", ""))
+            self.ytdlp_quick_mp3_chk.setChecked(
+                bool(self.settings.get("ytdlp_quick_download_mp3", True))
+            )
         finally:
             self._suppress_unsaved = False
         self._rebuild_ai_models_ui()
@@ -1697,6 +1723,7 @@ class SongPulseWindow(QMainWindow):
         self.settings["buffer_seconds"] = self.buf_spin.value()
         self.settings["live_max_seconds"] = self.live_spin.value()
         self.settings["ytdlp_app_path"] = self.ytdlp_path_input.text().strip()
+        self.settings["ytdlp_quick_download_mp3"] = self.ytdlp_quick_mp3_chk.isChecked()
         self.settings["gpu_auto_cpu"] = self.gpu_auto_cpu_chk.isChecked()
         self.settings["gpu_threshold"] = self.gpu_thresh_spin.value()
 
@@ -2886,18 +2913,24 @@ class SongPulseWindow(QMainWindow):
 
     def _on_card_selection_toggled(self, song_id: str, checked: bool):
         if checked:
-            self.selected_song_ids.add(song_id)
+            if song_id not in self.selected_song_ids:
+                self.selected_song_ids.append(song_id)
         else:
-            self.selected_song_ids.discard(song_id)
+            if song_id in self.selected_song_ids:
+                self.selected_song_ids.remove(song_id)
         self._update_batch_ui()
 
     def _on_select_all_toggled(self, state: int):
         check_all = state == Qt.CheckState.Checked.value
-        self.selected_song_ids.clear()
-        for card in self._lib_cards:
-            card.set_checked_silent(check_all)
-            if check_all:
-                self.selected_song_ids.add(card._song_id)
+        if check_all:
+            for card in self._lib_cards:
+                card.set_checked_silent(True)
+                if card._song_id not in self.selected_song_ids:
+                    self.selected_song_ids.append(card._song_id)
+        else:
+            self.selected_song_ids.clear()
+            for card in self._lib_cards:
+                card.set_checked_silent(False)
         self._update_batch_ui()
 
     def _toggle_song_liked(self, song_id: str):
@@ -2974,9 +3007,8 @@ class SongPulseWindow(QMainWindow):
         if not pl:
             return
         ids = list(pl.get("song_ids", []))
-        for s in self.history:
-            sid = s.get("id")
-            if sid in self.selected_song_ids and sid not in ids:
+        for sid in self.selected_song_ids:
+            if sid and sid not in ids:
                 ids.append(sid)
         pl["song_ids"] = ids
         save_playlists(self.playlists)
@@ -2984,10 +3016,10 @@ class SongPulseWindow(QMainWindow):
         self.refresh_library()
 
     def _create_playlist_with_selected(self):
-        selected_copy = set(self.selected_song_ids)
+        selected_copy = list(self.selected_song_ids)
         pl = self._create_new_playlist()
         if pl and selected_copy:
-            pl["song_ids"] = [s["id"] for s in self.history if s.get("id") in selected_copy]
+            pl["song_ids"] = selected_copy
             save_playlists(self.playlists)
             self.refresh_library()
 
@@ -3028,9 +3060,7 @@ class SongPulseWindow(QMainWindow):
         self.selected_song_ids.clear()
         self.refresh_library()
 
-    def _batch_download_selected(self):
-        if not self.selected_song_ids:
-            return
+    def _ensure_ytdlp_exe_path(self) -> str:
         exe_path = (self.settings.get("ytdlp_app_path") or "").strip()
         if not exe_path or not os.path.exists(exe_path):
             detected = find_default_ytdlp_app()
@@ -3040,35 +3070,109 @@ class SongPulseWindow(QMainWindow):
             else:
                 chosen = prompt_install_or_locate_ytdlp(self)
                 if not chosen:
-                    return
+                    return ""
                 exe_path = chosen
                 self._on_ytdlp_path_picked(exe_path)
+        return exe_path
 
-        songs = [s for s in self.history if s.get("id") in self.selected_song_ids]
+    def _resolve_songs_for_ytdlp(self, songs: list[dict]) -> list[str]:
         urls = []
+        changed = False
         for s in songs:
-            u = s.get("youtube_video_url") or ""
-            if not u:
-                u = resolve_youtube_watch_url(s.get("artist", ""), s.get("title", ""))
-                if u:
-                    s["youtube_video_url"] = u
-            if u or s.get("youtube_url"):
-                urls.append(u or s["youtube_url"])
-        save_history(self.history)
+            u, updates = resolve_ytdlp_download_url(s)
+            if updates:
+                changed = True
+            if u:
+                urls.append(u)
+        if changed:
+            save_history(self.history)
+        return urls
+
+    def _download_active_playlist(self):
+        songs = self._get_visible_library_songs()
+        if not songs:
+            QMessageBox.information(self, "Empty Playlist", "There are no songs in this playlist to download.")
+            return
+
+        exe_path = self._ensure_ytdlp_exe_path()
+        if not exe_path:
+            return
+
+        pl = self._get_active_custom_playlist()
+        if pl is not None:
+            pl_name = (pl.get("name") or "Playlist").strip() or "Playlist"
+        elif self.active_playlist_key == "liked":
+            pl_name = "Liked Songs"
+        else:
+            pl_name = "Identified Songs"
+
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            urls = self._resolve_songs_for_ytdlp(songs)
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        if not urls:
+            QMessageBox.warning(self, "No Links", "Could not resolve YouTube links for this playlist.")
+            return
+
+        quick_mp3 = bool(self.settings.get("ytdlp_quick_download_mp3", True))
+        QApplication.clipboard().setText("\n".join(urls))
+        try:
+            launch_ytdlp_downloader(
+                exe_path,
+                urls,
+                playlist_name=pl_name,
+                quick_mp3=quick_mp3,
+                on_complete_cb=lambda folder, cnt, pl: self.ytdlp_download_finished.emit(folder, cnt, pl),
+            )
+            self.hud.show_message(
+                f"Downloading playlist '{pl_name}' ({len(urls)} song(s)) with yt-dlp Downloader",
+                dark=bool(self.last_dark_state),
+                dot_color="#22C55E",
+                auto_hide_ms=3400,
+            )
+        except Exception as e:
+            QMessageBox.warning(self, "Launch Failed", f"Could not open yt-dlp Downloader:\n{e}")
+
+    def _on_ytdlp_download_finished(self, saved_folder: str, count: int, playlist_name: str):
+        show_download_complete_popup(self, saved_folder, count, playlist_name)
+
+    def _batch_download_selected(self):
+        if not self.selected_song_ids:
+            return
+        exe_path = self._ensure_ytdlp_exe_path()
+        if not exe_path:
+            return
+
+        by_id = {s.get("id"): s for s in self.history if s.get("id")}
+        songs = [by_id[sid] for sid in self.selected_song_ids if sid in by_id]
+
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            urls = self._resolve_songs_for_ytdlp(songs)
+        finally:
+            QApplication.restoreOverrideCursor()
 
         if not urls:
             QMessageBox.warning(self, "No Links", "Could not resolve YouTube links for selected songs.")
             return
 
-        joined = "\n".join(urls)
-        QApplication.clipboard().setText(joined)
+        quick_mp3 = bool(self.settings.get("ytdlp_quick_download_mp3", True))
+        QApplication.clipboard().setText("\n".join(urls))
         try:
-            _launch_and_autopaste_ytdlp(exe_path, urls[0])
+            launch_ytdlp_downloader(
+                exe_path,
+                urls,
+                playlist_name="",
+                quick_mp3=quick_mp3,
+                on_complete_cb=lambda folder, cnt, pl: self.ytdlp_download_finished.emit(folder, cnt, pl),
+            )
             self.hud.show_message(
-                f"Copied {len(urls)} YouTube link(s) for yt-dlp Downloader",
+                f"Batch downloading {len(urls)} song(s) in selected order with yt-dlp Downloader",
                 dark=bool(self.last_dark_state),
                 dot_color="#22C55E",
-                auto_hide_ms=3200,
+                auto_hide_ms=3400,
             )
         except Exception as e:
             QMessageBox.warning(self, "Launch Failed", f"Could not open yt-dlp Downloader:\n{e}")
@@ -3084,7 +3188,7 @@ class SongPulseWindow(QMainWindow):
         self._lib_cards.clear()
 
         visible_ids = {s.get("id") for s in filtered}
-        self.selected_song_ids &= visible_ids
+        self.selected_song_ids = [sid for sid in self.selected_song_ids if sid in visible_ids]
 
         if not filtered:
             hk = self.settings.get("hotkey", "ctrl+alt+s").upper()

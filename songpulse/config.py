@@ -257,6 +257,7 @@ DEFAULT_SETTINGS = {
     "gpu_auto_cpu": True,
     "gpu_threshold": 65,
     "ytdlp_app_path": "",
+    "ytdlp_quick_download_mp3": True,
 }
 
 
@@ -356,12 +357,13 @@ def _extract_ytm_song_video_id(node) -> tuple[str, str]:
     return atv_id, first_id
 
 
-def _resolve_ytm_song_video_id(query_text: str) -> str:
-    """Resolves the audio-only Song (ATV / Art Track) videoId on YouTube Music instead of the music video."""
+def _resolve_ytm_audio_only_video_id(query_text: str) -> str:
+    """Resolves the audio-only Song (ATV / Art Track / Provided to YouTube) videoId without falling back to generic video."""
     q = (query_text or "").strip()
     if not q:
         return ""
 
+    first_ytm_id = ""
     # 1. Query YouTube Music's own InnerTube search filtered strictly to Songs (prefers MUSIC_VIDEO_TYPE_ATV)
     try:
         client_ver = f"1.{datetime.datetime.now().strftime('%Y%m%d')}.01.00"
@@ -392,34 +394,63 @@ def _resolve_ytm_song_video_id(query_text: str) -> str:
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read().decode("utf-8", errors="ignore"))
-        atv_id, first_id = _extract_ytm_song_video_id(data)
+        atv_id, first_ytm_id = _extract_ytm_song_video_id(data)
         if atv_id:
             return atv_id
-        if first_id:
-            return first_id
     except Exception:
         pass
 
-    # 2. Fallback: look for auto-generated Topic / Art Track on YouTube, then generic search
-    for suffix in (' "Provided to YouTube"', ""):
-        search_url = (
-            f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(q + suffix)}"
+    # 2. Check auto-generated Topic / Art Track ("Provided to YouTube") on YouTube
+    topic_q = f'{q} "Provided to YouTube"'
+    search_url = (
+        f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(topic_q)}"
+    )
+    try:
+        req = urllib.request.Request(
+            search_url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept-Language": "en-US,en;q=0.9",
+            },
         )
-        try:
-            req = urllib.request.Request(
-                search_url,
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                    "Accept-Language": "en-US,en;q=0.9",
-                },
-            )
-            with urllib.request.urlopen(req, timeout=4) as resp:
-                html_body = resp.read().decode("utf-8", errors="ignore")
-            m = re.search(r'"videoId":"([A-Za-z0-9_-]{11})"', html_body)
-            if m:
-                return m.group(1)
-        except Exception:
-            pass
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            html_body = resp.read().decode("utf-8", errors="ignore")
+        m = re.search(r'"videoId":"([A-Za-z0-9_-]{11})"', html_body)
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+
+    return first_ytm_id or ""
+
+
+def _resolve_ytm_song_video_id(query_text: str) -> str:
+    """Resolves the audio-only Song (ATV / Art Track) videoId on YouTube Music, falling back to generic YouTube search."""
+    q = (query_text or "").strip()
+    if not q:
+        return ""
+
+    audio_id = _resolve_ytm_audio_only_video_id(q)
+    if audio_id:
+        return audio_id
+
+    # Fallback: generic YouTube search
+    search_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(q)}"
+    try:
+        req = urllib.request.Request(
+            search_url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept-Language": "en-US,en;q=0.9",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            html_body = resp.read().decode("utf-8", errors="ignore")
+        m = re.search(r'"videoId":"([A-Za-z0-9_-]{11})"', html_body)
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
     return ""
 
 

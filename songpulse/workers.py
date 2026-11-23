@@ -32,6 +32,7 @@ from .config import (
     TOOLS_DIR,
     UVR_MODEL_NAME,
     YTDLP_GITHUB_REPO,
+    _resolve_ytm_audio_only_video_id,
     find_default_ytdlp_app,
     get_model_file_path,
     get_nvidia_gpu_info,
@@ -233,6 +234,7 @@ def _build_song_dict_from_metadata(
             if album
             else ""
         ),
+        "youtube_song_url": "",
         "youtube_video_url": "",
         "isrc": "",
         "duration_ms": duration_ms,
@@ -387,6 +389,7 @@ def parse_shazam_response(out, method_label=""):
         "preview_url": preview_url,
         "artist_url": artist_url,
         "album_url": album_url,
+        "youtube_song_url": "",
         "youtube_video_url": "",
         "isrc": track.get("isrc", ""),
         "duration_ms": 0,
@@ -1672,6 +1675,12 @@ class IdentifyWorker(QThread):
                         pass
 
 
+def resolve_youtube_song_url(artist: str, title: str) -> str:
+    """Finds the direct YouTube Music audio-only Song (ATV / Art Track) watch URL."""
+    vid = _resolve_ytm_audio_only_video_id(f"{artist} {title}".strip())
+    return f"https://music.youtube.com/watch?v={vid}" if vid else ""
+
+
 def resolve_youtube_watch_url(artist: str, title: str) -> str:
     """Finds the top direct youtube.com/watch?v=... link."""
     query = urllib.parse.quote_plus(f"{artist} {title} official audio".strip())
@@ -1692,6 +1701,41 @@ def resolve_youtube_watch_url(artist: str, title: str) -> str:
     except Exception:
         pass
     return ""
+
+
+def resolve_ytdlp_download_url(song: dict) -> tuple[str, dict]:
+    """Resolves the audio-only song link first, falling back to the video link if unavailable."""
+    if not song:
+        return "", {}
+
+    artist = song.get("artist", "")
+    title = song.get("title", "")
+    updates = {}
+
+    song_url = (song.get("youtube_song_url") or "").strip()
+    if not song_url:
+        song_url = resolve_youtube_song_url(artist, title)
+        if song_url:
+            song["youtube_song_url"] = song_url
+            updates["youtube_song_url"] = song_url
+    if song_url:
+        return song_url, updates
+
+    video_url = (song.get("youtube_video_url") or "").strip()
+    if not video_url:
+        yt_raw = (song.get("youtube_url") or "").strip()
+        if "watch?v=" in yt_raw or "youtu.be/" in yt_raw:
+            video_url = yt_raw
+        else:
+            video_url = resolve_youtube_watch_url(artist, title)
+        if video_url:
+            song["youtube_video_url"] = video_url
+            updates["youtube_video_url"] = video_url
+    if video_url:
+        return video_url, updates
+
+    fallback = (song.get("yt_music_url") or song.get("youtube_url") or "").strip()
+    return fallback, updates
 
 
 class ArtistInfoWorker(QThread):
@@ -1996,6 +2040,12 @@ class SongDetailEnrichWorker(QThread):
                         updates["duration_ms"] = int(hit["trackTimeMillis"])
             except Exception:
                 pass
+
+        yt_song_existing = self.song.get("youtube_song_url") or ""
+        if not yt_song_existing and (title or artist):
+            song_url = resolve_youtube_song_url(artist, title)
+            if song_url:
+                updates["youtube_song_url"] = song_url
 
         yt_existing = self.song.get("youtube_video_url") or ""
         if not yt_existing:
