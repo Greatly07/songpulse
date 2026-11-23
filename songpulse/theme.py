@@ -221,6 +221,28 @@ def create_ui_icon(kind: str, color_hex="#E4E4E7", size=16):
                 ]
             )
         )
+    elif kind == "mini_mode":
+        p.drawRoundedRect(
+            QRectF(s * 0.12, s * 0.16, s * 0.76, s * 0.68), s * 0.12, s * 0.12
+        )
+        p.setBrush(QBrush(QColor(color_hex)))
+        p.drawRoundedRect(
+            QRectF(s * 0.46, s * 0.46, s * 0.34, s * 0.28), s * 0.06, s * 0.06
+        )
+    elif kind == "restore_app":
+        p.drawRoundedRect(
+            QRectF(s * 0.14, s * 0.18, s * 0.72, s * 0.64), s * 0.12, s * 0.12
+        )
+        p.drawLine(QPointF(s * 0.34, s * 0.66), QPointF(s * 0.66, s * 0.34))
+        p.drawPolyline(
+            QPolygonF(
+                [
+                    QPointF(s * 0.44, s * 0.34),
+                    QPointF(s * 0.66, s * 0.34),
+                    QPointF(s * 0.66, s * 0.56),
+                ]
+            )
+        )
     elif kind in ("heart", "heart_filled"):
         path = QPainterPath()
         path.moveTo(s * 0.50, s * 0.82)

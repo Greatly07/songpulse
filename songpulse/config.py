@@ -19,7 +19,7 @@ import soundfile as sf
 
 # --- APP METADATA & PATHS ---
 APP_NAME = "SongPulse"
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.2.0"
 APP_USER_MODEL_ID = f"Greatly07.SongPulse.{APP_VERSION}"
 GITHUB_REPO = "Greatly07/songpulse"
 YTDLP_GITHUB_REPO = "Greatly07/yt-dlp-downloader"
@@ -46,6 +46,7 @@ PLAYLISTS_FILE = os.path.join(DATA_DIR, "playlists.json")
 SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
 ICON_CACHE_FILE = os.path.join(DATA_DIR, "songpulse.ico")
 PING_SOUND_FILE = os.path.join(DATA_DIR, "ping.wav")
+SAVED_CLIP_WAV = os.path.join(TEMP_DIR, "saved_test_clip.wav")
 SINGLE_INSTANCE_KEY = "SongPulse_SingleInstance_LocalServer_v1"
 
 for _d in (DATA_DIR, COVERS_DIR, TEMP_DIR, MODELS_DIR, ICONS_DIR, THEMES_DIR):

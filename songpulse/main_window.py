@@ -53,6 +53,7 @@ from .config import (
     ICON_COLOR_PRESETS,
     MODELS_DIR,
     PREFERRED_INFO_SITES,
+    SAVED_CLIP_WAV,
     THEMES_DIR,
     UVR_MODEL_NAME,
     ensure_ping_sound,
@@ -115,6 +116,7 @@ from .widgets import (
     HelpBadge,
     HistoryRowCard,
     HotkeyRecorderEdit,
+    MiniIdentifyWindow,
     NoWheelComboBox,
     NoWheelDoubleSpinBox,
     NoWheelSlider,
@@ -268,10 +270,18 @@ class SongPulseWindow(QMainWindow):
         self.sidebar_anim.finished.connect(self._on_sidebar_anim_finished)
 
         self._build_ui()
+        self.mini_window = MiniIdentifyWindow(self.app_icon)
+        self.mini_window.listen_clicked.connect(lambda: self.trigger_identify(mode="live"))
+        self.mini_window.buffer_clicked.connect(lambda: self.trigger_identify(mode="buffer"))
+        self.mini_window.cancel_clicked.connect(self.cancel_identify)
+        self.mini_window.ai_toggled.connect(self._on_mini_ai_toggled)
+        self.mini_window.restore_requested.connect(self._exit_mini_mode)
+        self.mini_window.set_ai_checked_silent(self.quick_ai_chk.isChecked())
         self._build_tray()
         self.apply_theme(force=True)
         self._apply_sidebar_state(self.width() < 760, animate=False)
         self._update_pin_button_ui()
+        self._refresh_identify_header()
 
         self.hotkey_signal.connect(self._on_hotkey_triggered)
         self.gpu_info_signal.connect(self._on_gpu_info_ready)
@@ -407,6 +417,8 @@ class SongPulseWindow(QMainWindow):
         self.collapse_btn.setIcon(create_ui_icon("sidebar", ctrl_col, 16))
         self.pin_btn.setIcon(create_ui_icon("pin", pin_col, 15))
         self.details_ui_icon = create_ui_icon("details", ctrl_col, 13)
+        if hasattr(self, "mini_mode_btn"):
+            self.mini_mode_btn.setIcon(create_ui_icon("mini_mode", ctrl_col, 14))
 
         cur_idx = 1 if self.pages.currentIndex() == 3 else self.pages.currentIndex()
         for idx, ((_label, ikey), btn) in enumerate(zip(self.nav_defs, self.nav_buttons)):
@@ -504,6 +516,10 @@ class SongPulseWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
 
+        header_top = QHBoxLayout()
+        header_top.setContentsMargins(0, 0, 0, 0)
+        header_top.setSpacing(10)
+
         title_col = QVBoxLayout()
         title_col.setSpacing(2)
         h1 = QLabel("Identify Song")
@@ -514,7 +530,17 @@ class SongPulseWindow(QMainWindow):
         self.sub_status_lbl.setWordWrap(True)
         title_col.addWidget(h1)
         title_col.addWidget(self.sub_status_lbl)
-        layout.addLayout(title_col)
+
+        self.mini_mode_btn = QPushButton(" Mini Window")
+        self.mini_mode_btn.setObjectName("PlatformBtn")
+        self.mini_mode_btn.setIconSize(QSize(14, 14))
+        self.mini_mode_btn.setToolTip("Hide main window to tray and open compact always-on-top Mini Window")
+        self.mini_mode_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.mini_mode_btn.clicked.connect(self._enter_mini_mode)
+
+        header_top.addLayout(title_col, 1)
+        header_top.addWidget(self.mini_mode_btn, alignment=Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
+        layout.addLayout(header_top)
 
         self.no_output_banner = QFrame()
         self.no_output_banner.setObjectName("ErrorBanner")
@@ -576,6 +602,14 @@ class SongPulseWindow(QMainWindow):
         self.buffer_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.buffer_btn.clicked.connect(lambda: self.trigger_identify(mode="buffer"))
 
+        self.save_clip_btn = QPushButton("Save Last 12s")
+        self.save_clip_btn.setObjectName("SecondaryActionBtn")
+        self.save_clip_btn.setToolTip(
+            "Save the last X seconds of audio so you can test it on multiple AI models"
+        )
+        self.save_clip_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.save_clip_btn.clicked.connect(self._save_recent_clip_for_testing)
+
         self.quick_ai_chk = QCheckBox("Tricky Track AI Rescue")
         self.quick_ai_chk.setChecked(bool(self.settings.get("use_ai_separation", False)))
         self.quick_ai_chk.stateChanged.connect(self._on_quick_ai_toggled)
@@ -586,9 +620,44 @@ class SongPulseWindow(QMainWindow):
         )
 
         buffer_row.addWidget(self.buffer_btn)
+        buffer_row.addWidget(self.save_clip_btn)
         buffer_row.addWidget(self.quick_ai_chk)
         buffer_row.addWidget(ai_help)
         btn_wrap.addLayout(buffer_row)
+
+        self.saved_clip_bar = QFrame()
+        self.saved_clip_bar.setObjectName("Card")
+        self.saved_clip_bar.setMaximumWidth(640)
+        sc_lay = QHBoxLayout(self.saved_clip_bar)
+        sc_lay.setContentsMargins(12, 7, 10, 7)
+        sc_lay.setSpacing(8)
+
+        self.saved_clip_lbl = QLabel("Saved clip ready")
+        self.saved_clip_lbl.setObjectName("Muted")
+        self.saved_clip_lbl.setStyleSheet("font-size: 11px; font-weight: 600;")
+
+        self.saved_clip_model_combo = NoWheelComboBox()
+        self.saved_clip_model_combo.setMinimumWidth(185)
+
+        self.test_saved_clip_btn = QPushButton("Test Saved Clip")
+        self.test_saved_clip_btn.setObjectName("PrimaryBtn")
+        self.test_saved_clip_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.test_saved_clip_btn.clicked.connect(self._test_saved_clip)
+
+        self.clear_saved_clip_btn = QPushButton("✕")
+        self.clear_saved_clip_btn.setObjectName("IconDangerBtn")
+        self.clear_saved_clip_btn.setFixedSize(26, 26)
+        self.clear_saved_clip_btn.setToolTip("Delete saved test clip")
+        self.clear_saved_clip_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.clear_saved_clip_btn.clicked.connect(self._clear_saved_clip)
+
+        sc_lay.addWidget(self.saved_clip_lbl)
+        sc_lay.addWidget(self.saved_clip_model_combo, 1)
+        sc_lay.addWidget(self.test_saved_clip_btn)
+        sc_lay.addWidget(self.clear_saved_clip_btn)
+        btn_wrap.addWidget(self.saved_clip_bar, alignment=Qt.AlignmentFlag.AlignCenter)
+        self._saved_clip_meta = ""
+        self._refresh_saved_clip_ui()
 
         self.ai_warn_banner.setVisible(self.quick_ai_chk.isChecked())
 
@@ -675,6 +744,8 @@ class SongPulseWindow(QMainWindow):
         self.no_output_banner.setVisible(not has_outputs)
         if not has_outputs:
             self.pulse_btn.clear_waveform()
+            if hasattr(self, "mini_window"):
+                self.mini_window.pulse_btn.clear_waveform()
 
         hk = self.settings.get("hotkey", "ctrl+alt+s").upper()
         buf_enabled = bool(self.settings.get("enable_audio_buffer", True))
@@ -691,9 +762,16 @@ class SongPulseWindow(QMainWindow):
         )
         self.sub_status_lbl.setText(f"{out_txt} • Shortcut: {hk} ({hk_mode})")
         self.buffer_btn.setVisible(buf_enabled)
+        self.save_clip_btn.setVisible(buf_enabled)
+        if hasattr(self, "mini_window"):
+            self.mini_window.buffer_btn.setVisible(buf_enabled)
         if not self.is_processing:
             self.pulse_btn.setText("Listen")
             self.buffer_btn.setText(f"Identify Last {buf_s}s")
+            self.save_clip_btn.setText(f"Save Last {buf_s}s")
+            if hasattr(self, "mini_window"):
+                self.mini_window.pulse_btn.setText("Listen")
+                self.mini_window.buffer_btn.setText(f"Identify Last {buf_s}s")
 
     # --- LIBRARY PAGE (FULL-WIDTH SCROLLING + PLAYLISTS + BATCH SELECT) ---
     def _build_library_page(self):
@@ -1575,6 +1653,7 @@ class SongPulseWindow(QMainWindow):
             self._suppress_unsaved = False
         self._rebuild_ai_models_ui()
         self._refresh_storage_summary()
+        self._refresh_saved_clip_ui()
         self._update_gpu_indicator()
         self._refresh_gpu_info_async()
 
@@ -2005,6 +2084,7 @@ class SongPulseWindow(QMainWindow):
                 self._disable_ai_checkbox_cleanly()
         self._rebuild_ai_models_ui()
         self._refresh_storage_summary()
+        self._refresh_saved_clip_ui()
 
     def _add_custom_ai_model(self):
         picked, _ = QFileDialog.getOpenFileName(
@@ -2032,6 +2112,7 @@ class SongPulseWindow(QMainWindow):
         self._on_select_ai_model(base)
         self._rebuild_ai_models_ui()
         self._refresh_storage_summary()
+        self._refresh_saved_clip_ui()
         QMessageBox.information(
             self, "Model Added", f"Custom model '{base}' imported and selected."
         )
@@ -2045,6 +2126,8 @@ class SongPulseWindow(QMainWindow):
             self.quick_ai_chk.setChecked(False)
             self.quick_ai_chk.blockSignals(False)
             self.ai_warn_banner.setVisible(False)
+        if hasattr(self, "mini_window"):
+            self.mini_window.set_ai_checked_silent(False)
 
     def _refresh_storage_summary(self):
         if not hasattr(self, "storage_summary_lbl"):
@@ -2117,20 +2200,31 @@ class SongPulseWindow(QMainWindow):
 
     # --- LIVE WAVEFORM & PERIODIC TICK ---
     def _tick_waveform(self):
-        if not self.isVisible() or self.pages.currentIndex() != 0:
+        main_active = self.isVisible() and self.pages.currentIndex() == 0
+        mini_active = hasattr(self, "mini_window") and self.mini_window.isVisible()
+        if not main_active and not mini_active:
             return
         has_out = len(self.engine.monitored_names) > 0
         if has_out:
             bands, left_b, right_b, rms = self.engine.get_live_waveform_stereo(WAVEFORM_BARS)
         else:
             bands, left_b, right_b, rms = None, None, None, 0.0
-        self.pulse_btn.step_animation(
-            bands,
-            rms,
-            has_outputs=has_out,
-            left_bands=left_b,
-            right_bands=right_b,
-        )
+        if main_active:
+            self.pulse_btn.step_animation(
+                bands,
+                rms,
+                has_outputs=has_out,
+                left_bands=left_b,
+                right_bands=right_b,
+            )
+        if mini_active:
+            self.mini_window.pulse_btn.step_animation(
+                bands,
+                rms,
+                has_outputs=has_out,
+                left_bands=left_b,
+                right_bands=right_b,
+            )
 
     def _on_periodic_tick(self):
         if self.settings.get("theme", "auto") == "auto":
@@ -2292,6 +2386,9 @@ class SongPulseWindow(QMainWindow):
         act_open = QAction("Open SongPulse", self)
         act_open.triggered.connect(self.show_and_focus)
 
+        act_mini = QAction("Open Mini Window", self)
+        act_mini.triggered.connect(self._enter_mini_mode)
+
         act_buf = QAction("Identify Last Audio", self)
         act_buf.triggered.connect(lambda: self.trigger_identify(mode="buffer"))
 
@@ -2302,6 +2399,7 @@ class SongPulseWindow(QMainWindow):
         act_quit.triggered.connect(self.quit_app)
 
         menu.addAction(act_open)
+        menu.addAction(act_mini)
         menu.addAction(act_buf)
         menu.addAction(act_live)
         menu.addSeparator()
@@ -2395,6 +2493,8 @@ class SongPulseWindow(QMainWindow):
             pass
         self.hud.hide()
         self.song_popup.hide()
+        if hasattr(self, "mini_window"):
+            self.mini_window.hide()
         self.tray.hide()
         QApplication.quit()
         if force:
@@ -2502,6 +2602,22 @@ class SongPulseWindow(QMainWindow):
                 step=eff_step,
             )
 
+        if (theme_changed or wf_changed) and hasattr(self, "mini_window"):
+            wf_kwargs = {
+                "style": eff_style,
+                "mirror": eff_mirror,
+                "idle_dots": eff_idle_dots,
+                "max_width": eff_max_w,
+                "color1": wf_theme.get("color1", cfg.get("colors", {}).get("accent", "#3B82F6")),
+                "color2": wf_theme.get("color2", cfg.get("colors", {}).get("accent_secondary", "#8B5CF6")),
+                "flip_hz": bool(wf_theme.get("flip_hz", False)),
+                "hair_ties": bool(wf_theme.get("hair_ties", False)),
+                "right_alt_white": bool(wf_theme.get("right_alt_white", False)),
+                "teto_bow": bool(wf_theme.get("teto_bow", False)),
+                "step": eff_step,
+            }
+            self.mini_window.apply_theme_config(dark, cfg, wf_kwargs)
+
     # --- NAVIGATION WITH UNSAVED SETTINGS GUARD ---
     def _set_active_nav(self, idx):
         self.pages.setCurrentIndex(idx)
@@ -2568,7 +2684,8 @@ class SongPulseWindow(QMainWindow):
 
         ts = song.get("timestamp", "")
         method = song.get("method", "")
-        time_line = f"Found on {ts}" if ts else ""
+        prefix = "Reidentified on" if song.get("reidentified") else "Identified on"
+        time_line = f"{prefix} {ts}" if ts else ""
         if method:
             time_line = f"{time_line}  •  {method}" if time_line else method
         self.res_time.setText(time_line)
@@ -3114,7 +3231,102 @@ class SongPulseWindow(QMainWindow):
         self.settings["use_ai_separation"] = enabled
         self._saved_settings_snapshot["use_ai_separation"] = enabled
         self.ai_warn_banner.setVisible(enabled)
+        if hasattr(self, "mini_window"):
+            self.mini_window.set_ai_checked_silent(enabled)
         save_settings(self.settings)
+
+    def _on_mini_ai_toggled(self, enabled: bool):
+        if hasattr(self, "quick_ai_chk") and self.quick_ai_chk.isChecked() != enabled:
+            self.quick_ai_chk.setChecked(enabled)
+
+    def _enter_mini_mode(self):
+        if not hasattr(self, "mini_window"):
+            return
+        self.hide()
+        self.mini_window.show()
+        self.mini_window.raise_()
+        self.mini_window.activateWindow()
+        set_windows_titlebar_theme(int(self.mini_window.winId()), bool(self.last_dark_state))
+        set_window_always_on_top(int(self.mini_window.winId()), self.mini_window.is_pinned)
+
+    def _exit_mini_mode(self):
+        if hasattr(self, "mini_window"):
+            self.mini_window.hide()
+        self.show_and_focus()
+
+    def _save_recent_clip_for_testing(self):
+        if self.is_processing:
+            return
+        if not self.engine.monitored_names:
+            self.live_status_lbl.setText("No audio output selected. Pick an output in Settings.")
+            return
+        buf_s = max(5, int(self.settings.get("buffer_seconds", 12)))
+        if not self.engine.dump_recent_to_wav(SAVED_CLIP_WAV, seconds=buf_s):
+            self.live_status_lbl.setText("No recent audio found to save. Make sure audio is playing.")
+            return
+        stamp = time.strftime("%I:%M:%S %p").lstrip("0")
+        self._saved_clip_meta = f"Saved {buf_s}s ({stamp})"
+        self._refresh_saved_clip_ui()
+        self.live_status_lbl.setText(
+            f"Saved last {buf_s}s clip. Pick any AI model below to test without losing the audio."
+        )
+
+    def _clear_saved_clip(self):
+        if os.path.isfile(SAVED_CLIP_WAV):
+            try:
+                os.remove(SAVED_CLIP_WAV)
+            except OSError:
+                pass
+        self._saved_clip_meta = ""
+        self._refresh_saved_clip_ui()
+
+    def _refresh_saved_clip_ui(self):
+        if not hasattr(self, "saved_clip_bar"):
+            return
+        exists = os.path.isfile(SAVED_CLIP_WAV)
+        self.saved_clip_bar.setVisible(exists)
+        if not exists:
+            return
+
+        buf_s = int(self.settings.get("buffer_seconds", 12))
+        self.saved_clip_lbl.setText(self._saved_clip_meta or f"Saved {buf_s}s clip")
+
+        prev_data = self.saved_clip_model_combo.currentData()
+        self.saved_clip_model_combo.blockSignals(True)
+        self.saved_clip_model_combo.clear()
+
+        ready_models = [m for m in get_downloaded_ai_models() if is_model_ready(m)]
+        if len(ready_models) > 1:
+            self.saved_clip_model_combo.addItem(
+                f"All Downloaded AI Models ({len(ready_models)})", "__all__"
+            )
+
+        catalog_names = {e["filename"]: e["name"] for e in AI_MODEL_CATALOG}
+        for m in ready_models:
+            disp = catalog_names.get(m, os.path.splitext(os.path.basename(m))[0])
+            self.saved_clip_model_combo.addItem(disp, m)
+
+        self.saved_clip_model_combo.addItem("Original Audio (No AI)", "__raw__")
+
+        if prev_data:
+            for idx in range(self.saved_clip_model_combo.count()):
+                if self.saved_clip_model_combo.itemData(idx) == prev_data:
+                    self.saved_clip_model_combo.setCurrentIndex(idx)
+                    break
+        self.saved_clip_model_combo.blockSignals(False)
+
+    def _test_saved_clip(self):
+        if not os.path.isfile(SAVED_CLIP_WAV):
+            self._refresh_saved_clip_ui()
+            return
+        sel = self.saved_clip_model_combo.currentData() or "__raw__"
+        if sel == "__all__":
+            models = [m for m in get_downloaded_ai_models() if is_model_ready(m)]
+            if not models:
+                models = ["__raw__"]
+        else:
+            models = [sel]
+        self.trigger_identify(mode="saved_clip", test_models=models)
 
     def _register_hotkey(self, hk):
         if self.registered_hotkey:
@@ -3137,12 +3349,12 @@ class SongPulseWindow(QMainWindow):
             mode = "live"
         self.trigger_identify(mode=mode, from_hotkey=True)
 
-    def trigger_identify(self, mode="live", from_hotkey=False):
+    def trigger_identify(self, mode="live", from_hotkey=False, test_models=None):
         if self.is_processing:
             return
         if mode == "buffer" and not self.settings.get("enable_audio_buffer", True):
             mode = "live"
-        if not self.engine.monitored_names:
+        if mode != "saved_clip" and not self.engine.monitored_names:
             msg = "No audio output selected. Pick an output in Settings."
             self.live_status_lbl.setText(msg)
             self.hud.show_message(
@@ -3157,10 +3369,21 @@ class SongPulseWindow(QMainWindow):
         self.cancel_evt.clear()
         self.pulse_btn.setEnabled(False)
         self.pulse_btn.set_scanning(True)
-        self.pulse_btn.setText("Listening..." if mode == "live" else "Scanning...")
+        scan_label = "Listening..." if mode == "live" else "Scanning..."
+        self.pulse_btn.setText(scan_label)
         self.buffer_btn.setEnabled(False)
+        self.save_clip_btn.setEnabled(False)
+        self.test_saved_clip_btn.setEnabled(False)
+        self.clear_saved_clip_btn.setEnabled(False)
         self.quick_ai_chk.setEnabled(False)
         self.cancel_btn.show()
+        if hasattr(self, "mini_window"):
+            self.mini_window.pulse_btn.setEnabled(False)
+            self.mini_window.pulse_btn.set_scanning(True)
+            self.mini_window.pulse_btn.setText(scan_label)
+            self.mini_window.buffer_btn.setEnabled(False)
+            self.mini_window.ai_chk.setEnabled(False)
+            self.mini_window.cancel_btn.show()
 
         if (
             self.settings.get("always_show_status_hud", True)
@@ -3171,7 +3394,13 @@ class SongPulseWindow(QMainWindow):
             self.hud.show_message(label, dark=bool(self.last_dark_state), dot_color="#3B82F6")
 
         self.worker = IdentifyWorker(
-            self.engine, self.model_mgr, self.settings, mode=mode, cancel_evt=self.cancel_evt
+            self.engine,
+            self.model_mgr,
+            self.settings,
+            mode=mode,
+            cancel_evt=self.cancel_evt,
+            custom_wav_path=SAVED_CLIP_WAV if mode == "saved_clip" else "",
+            test_models=test_models,
         )
         self.worker.status_update.connect(self._on_worker_status)
         self.worker.song_found.connect(self._on_song_found)
@@ -3188,6 +3417,8 @@ class SongPulseWindow(QMainWindow):
         if self.worker is not None and hasattr(self.worker, "request_cancel"):
             self.worker.request_cancel()
         self.cancel_btn.setEnabled(False)
+        if hasattr(self, "mini_window"):
+            self.mini_window.cancel_btn.setEnabled(False)
         self.live_status_lbl.setText("Cancelling...")
 
     def _on_worker_status(self, text):
@@ -3195,8 +3426,28 @@ class SongPulseWindow(QMainWindow):
         if self.hud.isVisible() or self.settings.get("always_show_status_hud", True):
             self.hud.show_message(text, dark=bool(self.last_dark_state), dot_color="#3B82F6")
 
+    def _is_song_in_library(self, new_song: dict) -> bool:
+        title = (new_song.get("title") or "").strip().lower()
+        artist = (new_song.get("artist") or "").strip().lower()
+        isrc = (new_song.get("isrc") or "").strip().lower()
+        shazam_url = (new_song.get("shazam_url") or "").strip().lower()
+        for existing in self.history:
+            if isrc and (existing.get("isrc") or "").strip().lower() == isrc:
+                return True
+            if shazam_url and (existing.get("shazam_url") or "").strip().lower() == shazam_url:
+                return True
+            if (
+                title
+                and artist
+                and (existing.get("title") or "").strip().lower() == title
+                and (existing.get("artist") or "").strip().lower() == artist
+            ):
+                return True
+        return False
+
     def _on_song_found(self, song):
         self.hud.hide()
+        song["reidentified"] = self._is_song_in_library(song)
         self.history.insert(0, song)
         save_history(self.history)
         self.display_song_card(song)
@@ -3269,7 +3520,17 @@ class SongPulseWindow(QMainWindow):
         self.cancel_btn.hide()
         self.cancel_btn.setEnabled(True)
         self.buffer_btn.setEnabled(True)
+        self.save_clip_btn.setEnabled(True)
+        self.test_saved_clip_btn.setEnabled(True)
+        self.clear_saved_clip_btn.setEnabled(True)
         self.quick_ai_chk.setEnabled(True)
+        if hasattr(self, "mini_window"):
+            self.mini_window.pulse_btn.set_scanning(False)
+            self.mini_window.pulse_btn.setEnabled(True)
+            self.mini_window.cancel_btn.hide()
+            self.mini_window.cancel_btn.setEnabled(True)
+            self.mini_window.buffer_btn.setEnabled(True)
+            self.mini_window.ai_chk.setEnabled(True)
         self._refresh_identify_header()
 
     def _toast(self, title, msg, launch_url=None, browser_url=None, icon_path=None):

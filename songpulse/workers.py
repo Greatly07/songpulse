@@ -27,6 +27,7 @@ from .config import (
     GITHUB_REPO,
     MODELS_DIR,
     SAMPLE_RATE,
+    SAVED_CLIP_WAV,
     TEMP_DIR,
     TOOLS_DIR,
     UVR_MODEL_NAME,
@@ -1183,13 +1184,24 @@ class IdentifyWorker(QThread):
     cancelled = pyqtSignal()
     error = pyqtSignal(str)
 
-    def __init__(self, engine, model_mgr: ModelManager, settings: dict, mode: str, cancel_evt: threading.Event):
+    def __init__(
+        self,
+        engine,
+        model_mgr: ModelManager,
+        settings: dict,
+        mode: str,
+        cancel_evt: threading.Event,
+        custom_wav_path: str = "",
+        test_models: list[str] | None = None,
+    ):
         super().__init__()
         self.engine = engine
         self.model_mgr = model_mgr
         self.settings = dict(settings)
         self.mode = mode
         self.cancel_evt = cancel_evt
+        self.custom_wav_path = custom_wav_path or ""
+        self.test_models = list(test_models) if test_models is not None else []
         self._loop = None
         self._active_task = None
         self._loop_lock = threading.Lock()
@@ -1305,13 +1317,28 @@ class IdentifyWorker(QThread):
             out.append((secondary, "Checking secondary stem...", method_label + " • Stem 2"))
         return out
 
-    async def _run_ai_rescue_async(self, shazam: Shazam, raw_wav: str, generated_files: list):
+    def _model_display_name(self, model_name: str) -> str:
+        for entry in AI_MODEL_CATALOG:
+            if entry.get("filename") == model_name:
+                return entry.get("name", model_name)
+        return os.path.splitext(os.path.basename(model_name or UVR_MODEL_NAME))[0]
+
+    async def _run_ai_rescue_async(
+        self,
+        shazam: Shazam,
+        raw_wav: str,
+        generated_files: list,
+        model_override: str | None = None,
+        include_speed_sweep: bool = True,
+        label_prefix: str = "",
+    ):
         """Runs the configured local AI rescue model (UVR or Whisper) + optional speed sweep."""
-        model_name = self.settings.get("ai_model", UVR_MODEL_NAME)
+        model_name = model_override or self.settings.get("ai_model", UVR_MODEL_NAME)
+        model_disp = self._model_display_name(model_name)
         use_cpu, _note = self._should_use_cpu_fallback()
 
         if is_whisper_model_id(model_name):
-            self.status_update.emit("Transcribing lyrics locally with Whisper...")
+            self.status_update.emit(f"Transcribing lyrics with {model_disp}...")
             loop = asyncio.get_running_loop()
             res = await loop.run_in_executor(
                 None,
@@ -1322,6 +1349,8 @@ class IdentifyWorker(QThread):
             if self.cancel_evt.is_set():
                 raise asyncio.CancelledError()
             if res:
+                if label_prefix:
+                    res["method"] = f"{label_prefix} • {model_disp} • {res.get('method', '')}".strip(" •")
                 return res
         else:
             loop = asyncio.get_running_loop()
@@ -1334,22 +1363,25 @@ class IdentifyWorker(QThread):
             for wav_p, msg, lbl in stems:
                 self.status_update.emit(msg)
                 out = await self._recognize_cancellable(shazam, wav_p, timeout=10.0)
-                res = parse_shazam_response(out, lbl)
+                full_lbl = f"{label_prefix} • {model_disp} • {lbl}" if label_prefix else lbl
+                res = parse_shazam_response(out, full_lbl)
                 if res:
                     return res
 
-        # Speed/pitch rescue sweep for sped-up / slowed+reverb tracks (0 extra download)
-        for factor, tag in ((0.84, "Sped-Up Rescue"), (1.18, "Slowed Rescue")):
-            if self.cancel_evt.is_set():
-                raise asyncio.CancelledError()
-            sp_wav = os.path.join(TEMP_DIR, f"speed_{int(factor * 100)}.wav")
-            if _write_speed_variant(raw_wav, factor, sp_wav):
-                generated_files.append(sp_wav)
-                self.status_update.emit(f"Checking speed-adjusted audio ({tag})...")
-                out = await self._recognize_cancellable(shazam, sp_wav, timeout=8.0)
-                res = parse_shazam_response(out, f"AI • {tag}")
-                if res:
-                    return res
+        if include_speed_sweep:
+            # Speed/pitch rescue sweep for sped-up / slowed+reverb tracks (0 extra download)
+            for factor, tag in ((0.84, "Sped-Up Rescue"), (1.18, "Slowed Rescue")):
+                if self.cancel_evt.is_set():
+                    raise asyncio.CancelledError()
+                sp_wav = os.path.join(TEMP_DIR, f"speed_{int(factor * 100)}.wav")
+                if _write_speed_variant(raw_wav, factor, sp_wav):
+                    generated_files.append(sp_wav)
+                    self.status_update.emit(f"Checking speed-adjusted audio ({tag})...")
+                    out = await self._recognize_cancellable(shazam, sp_wav, timeout=8.0)
+                    full_tag = f"{label_prefix} • {tag}" if label_prefix else f"AI • {tag}"
+                    res = parse_shazam_response(out, full_tag)
+                    if res:
+                        return res
         return None
 
     async def _run_live_async(self, raw_wav: str, generated_files: list):
@@ -1521,14 +1553,63 @@ class IdentifyWorker(QThread):
         finally:
             await self._close_shazam(shazam)
 
-    def run(self):
-        if not self.engine.monitored_names:
-            self.error.emit("No audio output selected. Choose an output in Settings.")
-            return
+    async def _run_saved_clip_async(self, clip_wav: str, generated_files: list):
+        shazam = _create_shazam(attempts=2, max_timeout=1.2)
+        models = [m for m in self.test_models if m]
+        try:
+            if not models or models == ["__raw__"]:
+                self.status_update.emit("Testing saved clip (Original Audio)...")
+                out = await self._recognize_cancellable(shazam, clip_wav, timeout=12.0)
+                res = parse_shazam_response(out, "Saved Clip (Original)")
+                if res:
+                    self.song_found.emit(res)
+                else:
+                    self.no_match.emit()
+                return
 
+            total = len(models)
+            for idx, model_name in enumerate(models, 1):
+                if self.cancel_evt.is_set():
+                    self.cancelled.emit()
+                    return
+                if model_name == "__raw__":
+                    self.status_update.emit(f"Testing saved clip (Original Audio) [{idx}/{total}]...")
+                    out = await self._recognize_cancellable(shazam, clip_wav, timeout=12.0)
+                    res = parse_shazam_response(out, "Saved Clip (Original)")
+                    if res:
+                        self.song_found.emit(res)
+                        return
+                    continue
+
+                disp = self._model_display_name(model_name)
+                self.status_update.emit(f"Testing saved clip on {disp} [{idx}/{total}]...")
+                ai_res = await self._run_ai_rescue_async(
+                    shazam,
+                    clip_wav,
+                    generated_files,
+                    model_override=model_name,
+                    include_speed_sweep=(idx == total),
+                    label_prefix="Saved Clip",
+                )
+                if ai_res:
+                    self.song_found.emit(ai_res)
+                    return
+
+            if self.cancel_evt.is_set():
+                self.cancelled.emit()
+                return
+            self.no_match.emit()
+        finally:
+            await self._close_shazam(shazam)
+
+    def run(self):
         raw_wav = os.path.join(TEMP_DIR, "snapshot.wav")
         generated_files = []
         started_temp_capture = False
+
+        if self.mode != "saved_clip" and not self.engine.monitored_names:
+            self.error.emit("No audio output selected. Choose an output in Settings.")
+            return
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -1536,6 +1617,14 @@ class IdentifyWorker(QThread):
             self._loop = loop
 
         try:
+            if self.mode == "saved_clip":
+                clip_wav = self.custom_wav_path or SAVED_CLIP_WAV
+                if not os.path.isfile(clip_wav):
+                    self.error.emit("No saved audio clip found. Click 'Save Last Xs' first.")
+                    return
+                loop.run_until_complete(self._run_saved_clip_async(clip_wav, generated_files))
+                return
+
             if self.mode == "live":
                 if hasattr(self.engine, "begin_live_capture"):
                     self.engine.begin_live_capture()
@@ -1572,7 +1661,10 @@ class IdentifyWorker(QThread):
                 loop.close()
             except Exception:
                 pass
-            for f in [raw_wav] + generated_files:
+            cleanup_targets = list(generated_files)
+            if self.mode != "saved_clip":
+                cleanup_targets.append(raw_wav)
+            for f in cleanup_targets:
                 if f and os.path.exists(f):
                     try:
                         os.remove(f)

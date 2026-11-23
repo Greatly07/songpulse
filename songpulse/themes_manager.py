@@ -13,6 +13,10 @@ MIKU_SIDEBAR_IMG = os.path.join(THEMES_DIR, "miku_sidebar.png")
 _BUNDLED_MIKU_ASSET = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "miku_sidebar.png")
 TETO_SIDEBAR_IMG = os.path.join(THEMES_DIR, "teto_sidebar.png")
 _BUNDLED_TETO_ASSET = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "teto_sidebar.png")
+MIKU_MINI_IMG = os.path.join(THEMES_DIR, "miku_miniplayer.png")
+_BUNDLED_MIKU_MINI_ASSET = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "miku_miniplayer.png")
+TETO_MINI_IMG = os.path.join(THEMES_DIR, "teto_miniplayer.png")
+_BUNDLED_TETO_MINI_ASSET = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "teto_miniplayer.png")
 
 THEME_TEMPLATE = {
     "_comment": "SongPulse Custom Theme Template. Copy and rename this file (e.g. my_theme.json) in the themes folder, or use Settings -> Create Theme.",
@@ -150,6 +154,42 @@ def ensure_teto_sidebar_art() -> str:
     return ""
 
 
+def _ensure_bundled_theme_art(dest_path: str, bundled_path: str, filename: str) -> str:
+    """Resolves a bundled character art image and syncs it into THEMES_DIR."""
+    os.makedirs(THEMES_DIR, exist_ok=True)
+    for cand in (
+        bundled_path,
+        os.path.join(APP_DIR, "_internal", "songpulse", "assets", filename),
+        os.path.join(APP_DIR, "songpulse", "assets", filename),
+    ):
+        if os.path.isfile(cand):
+            try:
+                if (not os.path.isfile(dest_path)) or (
+                    os.path.getsize(dest_path) != os.path.getsize(cand)
+                ):
+                    shutil.copy2(cand, dest_path)
+            except OSError:
+                return cand
+            return dest_path
+    if os.path.isfile(dest_path):
+        return dest_path
+    return ""
+
+
+def ensure_miku_miniplayer_art() -> str:
+    """Returns Miku miniplayer 1:1 background image."""
+    return _ensure_bundled_theme_art(
+        MIKU_MINI_IMG, _BUNDLED_MIKU_MINI_ASSET, "miku_miniplayer.png"
+    )
+
+
+def ensure_teto_miniplayer_art() -> str:
+    """Returns Teto miniplayer 1:1 background image."""
+    return _ensure_bundled_theme_art(
+        TETO_MINI_IMG, _BUNDLED_TETO_MINI_ASSET, "teto_miniplayer.png"
+    )
+
+
 def ensure_theme_template_and_assets():
     os.makedirs(THEMES_DIR, exist_ok=True)
     tmpl_path = os.path.join(THEMES_DIR, TEMPLATE_FILENAME)
@@ -161,10 +201,13 @@ def ensure_theme_template_and_assets():
             pass
     ensure_miku_sidebar_art()
     ensure_teto_sidebar_art()
+    ensure_miku_miniplayer_art()
+    ensure_teto_miniplayer_art()
 
 
 def get_builtin_miku_theme() -> dict:
     img = ensure_miku_sidebar_art()
+    mini_img = ensure_miku_miniplayer_art()
     return {
         "id": "miku",
         "name": "Miku",
@@ -186,6 +229,17 @@ def get_builtin_miku_theme() -> dict:
             "fit": "cutout",
             "blur": 1,
             "glass_alpha": 42,
+        },
+        "miniplayer": {
+            "type": "image" if mini_img else "gradient",
+            "color1": "#061C2B",
+            "color2": "#0C485C",
+            "angle": 145,
+            "image": mini_img,
+            "fit": "cover",
+            "blur": 1,
+            "overlay_alpha": 52,
+            "glass_alpha": 52,
         },
         "colors": {
             "accent": "#39C5BB",
@@ -209,6 +263,7 @@ def get_builtin_miku_theme() -> dict:
 
 def get_builtin_teto_theme() -> dict:
     img = ensure_teto_sidebar_art()
+    mini_img = ensure_teto_miniplayer_art()
     return {
         "id": "teto",
         "name": "Teto",
@@ -230,6 +285,17 @@ def get_builtin_teto_theme() -> dict:
             "fit": "cutout",
             "blur": 1,
             "glass_alpha": 42,
+        },
+        "miniplayer": {
+            "type": "image" if mini_img else "gradient",
+            "color1": "#1A060D",
+            "color2": "#3B0E1D",
+            "angle": 145,
+            "image": mini_img,
+            "fit": "cover",
+            "blur": 1,
+            "overlay_alpha": 52,
+            "glass_alpha": 52,
         },
         "colors": {
             "accent": "#E11D48",

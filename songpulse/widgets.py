@@ -51,8 +51,13 @@ from PyQt6.QtWidgets import (
 )
 
 from .audio import WAVEFORM_BARS
-from .config import APP_NAME, open_external_url, set_window_always_on_top
-from .theme import create_app_pixmap, render_blurred_pixmap, rounded_pixmap
+from .config import (
+    APP_NAME,
+    open_external_url,
+    set_window_always_on_top,
+    set_windows_titlebar_theme,
+)
+from .theme import create_app_pixmap, create_ui_icon, render_blurred_pixmap, rounded_pixmap
 from .workers import build_song_platform_links
 
 
@@ -675,7 +680,17 @@ class HistoryRowCard(QFrame):
         sub_lbl.setObjectName("Muted")
         sub_lbl.setStyleSheet("font-size: 11px;")
 
-        ts_lbl = ElidedLabel(song.get("timestamp", ""))
+        raw_ts = song.get("timestamp", "")
+        if raw_ts:
+            prefix = "Reidentified on" if song.get("reidentified") else "Identified on"
+            ts_text = (
+                raw_ts
+                if raw_ts.lower().startswith(("identified on", "reidentified on"))
+                else f"{prefix} {raw_ts}"
+            )
+        else:
+            ts_text = ""
+        ts_lbl = ElidedLabel(ts_text)
         ts_lbl.setObjectName("Muted")
         ts_lbl.setStyleSheet("font-size: 10px;")
 
@@ -925,8 +940,8 @@ class PulseIdentifyWidget(QWidget):
             self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         else:
             self.setMinimumSize(236, 236)
-            self.setMaximumSize(236, 236)
-            self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            self.setMaximumSize(self._wf_max_width, 236)
+            self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._center_button()
 
     def _center_button(self):
@@ -1329,7 +1344,7 @@ class PulseIdentifyWidget(QWidget):
         btn_gap = 102.0 if self._wf_hair_ties else 80.0
         step = self._wf_step if self._wf_step >= 4.0 else 16.0
         usable_w = min(self.width(), self._wf_max_width)
-        side_avail = max(0.0, (usable_w / 2.0) - btn_gap - 10.0)
+        side_avail = max(0.0, (usable_w / 2.0) - btn_gap - 4.0)
         bars_per_side = max(0, min(80, int(side_avail // step)))
         if bars_per_side == 0:
             return
@@ -1391,7 +1406,7 @@ class PulseIdentifyWidget(QWidget):
         start_gap = 60.0
         step = self._wf_step if self._wf_step >= 4.0 else 9.2
         usable_w = min(self.width(), self._wf_max_width)
-        side_avail = max(0.0, (usable_w / 2.0) - start_gap - 8.0)
+        side_avail = max(0.0, (usable_w / 2.0) - start_gap - 3.0)
         peaks_per_side = max(0, min(100, int(side_avail // step)))
         if peaks_per_side < 2:
             return
@@ -2190,3 +2205,151 @@ class SongResultPopup(QWidget):
         self.show()
         set_window_always_on_top(int(self.winId()), True)
         self.hide_timer.start(12000)
+
+
+class MiniIdentifyWindow(QWidget):
+    """Compact, non-resizable, always-on-top mini window with Listen, Identify Last, AI Rescue, and live waveforms."""
+
+    listen_clicked = pyqtSignal()
+    buffer_clicked = pyqtSignal()
+    cancel_clicked = pyqtSignal()
+    ai_toggled = pyqtSignal(bool)
+    restore_requested = pyqtSignal()
+
+    def __init__(self, app_icon):
+        super().__init__(
+            None,
+            Qt.WindowType.Window
+            | Qt.WindowType.CustomizeWindowHint
+            | Qt.WindowType.WindowTitleHint
+            | Qt.WindowType.WindowSystemMenuHint
+            | Qt.WindowType.WindowCloseButtonHint,
+        )
+        self.setWindowTitle(APP_NAME)
+        self.setWindowIcon(app_icon)
+        self.setFixedSize(356, 356)
+        self.is_pinned = True
+        self._dark = True
+        self._accent = "#3B82F6"
+
+        root_lay = QVBoxLayout(self)
+        root_lay.setContentsMargins(0, 0, 0, 0)
+        root_lay.setSpacing(0)
+
+        self.bg_widget = ThemedBackgroundWidget()
+        root_lay.addWidget(self.bg_widget)
+
+        lay = QVBoxLayout(self.bg_widget)
+        lay.setContentsMargins(4, 10, 4, 12)
+        lay.setSpacing(8)
+
+        # Top utility bar: Always-on-top Pin toggle + Bring back full app button
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(8, 0, 8, 0)
+        top_row.setSpacing(6)
+
+        self.pin_btn = QPushButton()
+        self.pin_btn.setObjectName("SidebarIconBtn")
+        self.pin_btn.setFixedSize(28, 28)
+        self.pin_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.pin_btn.clicked.connect(self._toggle_pin)
+
+        self.restore_btn = QPushButton(" Open App")
+        self.restore_btn.setObjectName("PlatformBtn")
+        self.restore_btn.setIconSize(QSize(13, 13))
+        self.restore_btn.setToolTip("Bring back the main SongPulse window from tray")
+        self.restore_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.restore_btn.clicked.connect(self.restore_requested.emit)
+
+        top_row.addWidget(self.pin_btn)
+        top_row.addStretch(1)
+        top_row.addWidget(self.restore_btn)
+        lay.addLayout(top_row)
+
+        # Center waveform + Listen button
+        self.pulse_btn = PulseIdentifyWidget()
+        self.pulse_btn.setText("Listen")
+        self.pulse_btn.clicked.connect(self.listen_clicked.emit)
+        lay.addWidget(self.pulse_btn, 1)
+
+        # Bottom controls: Identify Last Xs, AI Rescue toggle, and Cancel (while scanning)
+        bot_row = QHBoxLayout()
+        bot_row.setContentsMargins(0, 0, 0, 0)
+        bot_row.setSpacing(8)
+
+        self.buffer_btn = QPushButton("Identify Last 12s")
+        self.buffer_btn.setObjectName("SecondaryActionBtn")
+        self.buffer_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.buffer_btn.clicked.connect(self.buffer_clicked.emit)
+
+        self.ai_chk = QCheckBox("AI Rescue")
+        self.ai_chk.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.ai_chk.stateChanged.connect(
+            lambda st: self.ai_toggled.emit(st == Qt.CheckState.Checked.value)
+        )
+
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setObjectName("DangerBtn")
+        self.cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.cancel_btn.clicked.connect(self.cancel_clicked.emit)
+        self.cancel_btn.hide()
+
+        bot_row.addStretch(1)
+        bot_row.addWidget(self.buffer_btn)
+        bot_row.addWidget(self.ai_chk)
+        bot_row.addWidget(self.cancel_btn)
+        bot_row.addStretch(1)
+        lay.addLayout(bot_row)
+
+        self._update_pin_ui()
+
+    def _toggle_pin(self):
+        self.set_pinned(not self.is_pinned)
+
+    def set_pinned(self, pinned: bool):
+        self.is_pinned = bool(pinned)
+        if self.isVisible():
+            set_window_always_on_top(int(self.winId()), self.is_pinned)
+        self._update_pin_ui()
+
+    def _update_pin_ui(self):
+        self.pin_btn.setProperty("pinned", self.is_pinned)
+        self.pin_btn.style().unpolish(self.pin_btn)
+        self.pin_btn.style().polish(self.pin_btn)
+        self.pin_btn.setToolTip(
+            "Pinned always on top (click to unpin)"
+            if self.is_pinned
+            else "Pin mini window always on top"
+        )
+        ctrl_col = "#D4D4D8" if self._dark else "#334155"
+        pin_col = self._accent if self.is_pinned else ctrl_col
+        self.pin_btn.setIcon(create_ui_icon("pin", pin_col, 15))
+        self.restore_btn.setIcon(create_ui_icon("restore_app", ctrl_col, 13))
+
+    def set_ai_checked_silent(self, checked: bool):
+        self.ai_chk.blockSignals(True)
+        self.ai_chk.setChecked(bool(checked))
+        self.ai_chk.blockSignals(False)
+
+    def apply_theme_config(self, dark: bool, cfg: dict | None, wf_kwargs: dict | None = None):
+        self._dark = bool(dark)
+        self._accent = (cfg or {}).get("colors", {}).get("accent", "#3B82F6")
+        bg_cfg = (cfg or {}).get("miniplayer") or (cfg or {}).get("background", {})
+        self.bg_widget.set_background_config(bg_cfg)
+        self.pulse_btn.set_dark(self._dark)
+        if wf_kwargs:
+            kw = dict(wf_kwargs)
+            kw["max_width"] = max(260, self.width() - 8)
+            self.pulse_btn.configure_waveform(**kw)
+        if self.isVisible():
+            set_windows_titlebar_theme(int(self.winId()), self._dark)
+        self._update_pin_ui()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        set_windows_titlebar_theme(int(self.winId()), self._dark)
+        set_window_always_on_top(int(self.winId()), self.is_pinned)
+
+    def closeEvent(self, event):
+        event.accept()
+        self.hide()

@@ -876,7 +876,8 @@ class SongDetailPage(QWidget):
 
         ts = s.get("timestamp", "")
         method = s.get("method", "")
-        found_txt = f"Identified on {ts}" if ts else ""
+        prefix = "Reidentified on" if s.get("reidentified") else "Identified on"
+        found_txt = f"{prefix} {ts}" if ts else ""
         if method:
             found_txt = f"{found_txt}  •  {method}" if found_txt else method
         self.found_lbl.setText(found_txt)
@@ -929,7 +930,7 @@ class SongDetailPage(QWidget):
             ("Record Label", s.get("label", "")),
             ("Duration", dur_str),
             ("ISRC", s.get("isrc", "")),
-            ("Identified On", ts),
+            ("Reidentified On" if s.get("reidentified") else "Identified On", ts),
         ]:
             if not val_txt:
                 continue

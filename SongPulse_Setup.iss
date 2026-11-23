@@ -1,10 +1,10 @@
 #define MyAppName "SongPulse"
-#define MyAppVersion "1.1.1"
+#define MyAppVersion "1.2.0"
 #define MyAppPublisher "Greatly07"
 #define MyAppURL "https://github.com/Greatly07/songpulse"
 #define MyAppExeName "SongPulse.exe"
-#define AiPackZipName "SongPulse_AI_Pack_v1.1.1.zip"
-#define AiPackURL "https://github.com/Greatly07/songpulse/releases/download/v1.1.1/SongPulse_AI_Pack_v1.1.1.zip"
+#define AiPackZipName "SongPulse_AI_Pack_v1.2.0.zip"
+#define AiPackURL "https://github.com/Greatly07/songpulse/releases/download/v1.2.0/SongPulse_AI_Pack_v1.2.0.zip"
 #define UvrBaseURL "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models"
 #define VCRedistURL "https://aka.ms/vs/17/release/vc_redist.x64.exe"
 
