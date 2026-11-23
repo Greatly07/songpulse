@@ -21,7 +21,8 @@ A lightweight Windows desktop music identifier that listens directly to your PC'
   - Switch between **Identified Songs**, **Liked Songs**, and unlimited **Custom Playlists**.
   - Reorder custom playlists manually via drag-and-drop or move arrows, or sort by Date, Title, Artist, Genre, or Album.
   - **Download Playlist:** One-click button to download the active playlist into a new subfolder named after the playlist via `yt-dlp-downloader`.
-  - Multi-select checkboxes and **Select All** with top-right **Add to Playlist**, **Batch Download (yt-dlp)** (preserving the exact order songs were selected, without creating a new subfolder), and **Clear Selected** actions.
+  - Multi-select checkboxes and **Select All** with a sticky top **Add to Playlist**, **Batch Download (yt-dlp)** (preserving the exact order songs were selected, without creating a new subfolder), and **Clear Selected** action bar that follows while scrolling.
+  - Right-click any song in the Library to **Like/Unlike**, **Listen in** your preferred music site, **Add to Playlist**, or **Download** via `yt-dlp-downloader`.
   - **Quick MP3 Download (Default ON):** Automatically launches `yt-dlp-downloader` via `ytdlp://` URI with the Music preset (preferring audio-only YouTube Music song links first and falling back to video if unavailable) and closes it automatically once downloads finish.
 
   <img width="480" alt="History Tab" src="https://github.com/user-attachments/assets/f6aa6dd2-60ef-4520-ac0a-a928f3d085f2" /><img width="480" alt="Liked Tab" src="https://github.com/user-attachments/assets/f32a99be-6440-460e-87a6-f9d51a47ce89" />

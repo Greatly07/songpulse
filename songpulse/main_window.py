@@ -56,6 +56,7 @@ from .config import (
     SAVED_CLIP_WAV,
     THEMES_DIR,
     UVR_MODEL_NAME,
+    build_site_url,
     ensure_ping_sound,
     find_default_ytdlp_app,
     format_bytes,
@@ -101,6 +102,7 @@ from .theme import (
     create_app_pixmap,
     create_platform_icon,
     create_ui_icon,
+    create_ytdlp_icon,
     ensure_chevron_icons,
     export_multi_res_ico,
     resolve_icon_colors,
@@ -128,6 +130,7 @@ from .widgets import (
     NoWheelSpinBox,
     PulseIdentifyWidget,
     ResponsiveLinksBar,
+    ScrollThroughMenu,
     SongResultPopup,
     SubtleStatusHUD,
     ThemedBackgroundWidget,
@@ -409,6 +412,7 @@ class SongPulseWindow(QMainWindow):
         self.detail_page.song_updated.connect(self._on_song_enriched)
         self.detail_page.ytdlp_path_changed.connect(self._on_ytdlp_path_picked)
         self.detail_page.like_toggled.connect(self._toggle_song_liked)
+        self.detail_page.volume_changed.connect(self._on_detail_volume_changed)
         self.pages.addWidget(self.detail_page)
         main_layout.addWidget(self.pages, 1)
 
@@ -504,6 +508,7 @@ class SongPulseWindow(QMainWindow):
                 self._apply_sidebar_state(True, animate=True)
         elif not self.sidebar_user_collapsed and self.sidebar_collapsed:
             self._apply_sidebar_state(False, animate=True)
+        self._sync_lib_header_responsive()
 
     # --- IDENTIFY PAGE ---
     def _build_identify_page(self):
@@ -781,72 +786,116 @@ class SongPulseWindow(QMainWindow):
                 self.mini_window.pulse_btn.setText("Listen")
                 self.mini_window.buffer_btn.setText(f"Identify Last {buf_s}s")
 
-    # --- LIBRARY PAGE (FULL-WIDTH SCROLLING + PLAYLISTS + BATCH SELECT) ---
+    # --- LIBRARY PAGE (STICKY HEADER + FULL-WIDTH SCROLLING + PLAYLISTS + BATCH SELECT) ---
     def _build_library_page(self):
         page = QWidget()
         page.setObjectName("Page")
         page_lay = QVBoxLayout(page)
         page_lay.setContentsMargins(0, 0, 0, 0)
+        page_lay.setSpacing(0)
 
-        # Full-width scroll area so scrolling on the empty left/right sides always works!
-        scroll_inner = QWidget()
-        outer = QHBoxLayout(scroll_inner)
-        outer.setContentsMargins(22, 18, 22, 18)
+        # Sticky top bar: stays fixed while scrolling so batch actions always follow on screen
+        self.lib_sticky_header = QWidget()
+        self.lib_sticky_header.setObjectName("Page")
+        self.lib_sticky_header.setFixedHeight(52)
+        self.lib_sticky_header.setMinimumWidth(0)
+        sticky_outer = QHBoxLayout(self.lib_sticky_header)
+        sticky_outer.setContentsMargins(22, 14, 22, 8)
+        sticky_outer.setSpacing(0)
 
-        center_col = QWidget()
-        center_col.setObjectName("Page")
-        center_col.setMaximumWidth(980)
-        center_col.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        layout = QVBoxLayout(center_col)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(10)
-
-        # Top header + batch action buttons on the right
-        top = QHBoxLayout()
+        header_col = QWidget()
+        header_col.setObjectName("Page")
+        header_col.setMaximumWidth(980)
+        header_col.setMinimumWidth(0)
+        header_col.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        top = QHBoxLayout(header_col)
+        top.setContentsMargins(0, 0, 0, 0)
         top.setSpacing(8)
+
+        self.lib_title_wrap = QWidget()
+        self.lib_title_wrap.setObjectName("Page")
+        title_lay = QHBoxLayout(self.lib_title_wrap)
+        title_lay.setContentsMargins(0, 0, 0, 0)
+        title_lay.setSpacing(4)
         h1 = QLabel("Library")
         h1.setStyleSheet("font-size: 20px; font-weight: 700;")
         self.lib_count_lbl = QLabel("")
         self.lib_count_lbl.setObjectName("Muted")
         self.lib_count_lbl.setStyleSheet("font-size: 12px; margin-left: 4px;")
+        title_lay.addWidget(h1)
+        title_lay.addWidget(self.lib_count_lbl)
 
-        # Batch action bar (shown when 1+ songs are checked)
+        # Sticky batch action bar (shown when 1+ songs are checked)
         self.batch_bar = QWidget()
+        self.batch_bar.setObjectName("Page")
         batch_lay = QHBoxLayout(self.batch_bar)
         batch_lay.setContentsMargins(0, 0, 0, 0)
-        batch_lay.setSpacing(6)
+        batch_lay.setSpacing(7)
+
+        self.batch_sel_lbl = QLabel("")
+        self.batch_sel_lbl.setObjectName("Muted")
+        self.batch_sel_lbl.setStyleSheet("font-size: 11px; font-weight: 600; margin-right: 2px;")
 
         self.batch_add_pl_btn = QPushButton("Add to Playlist ▾")
-        self.batch_add_pl_btn.setObjectName("PlatformBtn")
+        self.batch_add_pl_btn.setObjectName("StickyActionBtn")
+        self.batch_add_pl_btn.setFixedHeight(28)
+        self.batch_add_pl_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.batch_add_pl_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.batch_add_pl_btn.clicked.connect(self._show_batch_add_playlist_menu)
 
-        self.batch_ytdlp_btn = QPushButton("Batch Download (yt-dlp)")
-        self.batch_ytdlp_btn.setObjectName("PlatformBtn")
+        self.batch_ytdlp_btn = QPushButton(" Batch Download (yt-dlp)")
+        self.batch_ytdlp_btn.setObjectName("StickyActionBtn")
+        self.batch_ytdlp_btn.setIcon(create_ytdlp_icon(14))
+        self.batch_ytdlp_btn.setIconSize(QSize(14, 14))
+        self.batch_ytdlp_btn.setFixedHeight(28)
+        self.batch_ytdlp_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.batch_ytdlp_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.batch_ytdlp_btn.clicked.connect(self._batch_download_selected)
 
         self.batch_clear_btn = QPushButton("Clear Selected")
-        self.batch_clear_btn.setObjectName("DangerBtn")
+        self.batch_clear_btn.setObjectName("StickyDangerBtn")
+        self.batch_clear_btn.setFixedHeight(28)
+        self.batch_clear_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.batch_clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.batch_clear_btn.clicked.connect(self._clear_selected_songs)
 
+        batch_lay.addWidget(self.batch_sel_lbl)
         batch_lay.addWidget(self.batch_add_pl_btn)
         batch_lay.addWidget(self.batch_ytdlp_btn)
         batch_lay.addWidget(self.batch_clear_btn)
         self.batch_bar.hide()
 
         self.clear_all_btn = QPushButton("Clear All")
-        self.clear_all_btn.setObjectName("DangerBtn")
+        self.clear_all_btn.setObjectName("StickyDangerBtn")
+        self.clear_all_btn.setFixedHeight(28)
+        self.clear_all_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.clear_all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.clear_all_btn.clicked.connect(self.clear_history)
 
-        top.addWidget(h1)
-        top.addWidget(self.lib_count_lbl)
-        top.addStretch()
+        top.addWidget(self.lib_title_wrap)
+        top.addStretch(1)
         top.addWidget(self.batch_bar)
         top.addWidget(self.clear_all_btn)
-        layout.addLayout(top)
+
+        sticky_outer.addStretch(0)
+        sticky_outer.addWidget(header_col, 1)
+        sticky_outer.addStretch(0)
+        page_lay.addWidget(self.lib_sticky_header)
+
+        # Full-width scroll area so scrolling on the empty left/right sides always works!
+        scroll_inner = QWidget()
+        outer = QHBoxLayout(scroll_inner)
+        outer.setContentsMargins(22, 4, 22, 18)
+        outer.setSpacing(0)
+
+        center_col = QWidget()
+        center_col.setObjectName("Page")
+        center_col.setMaximumWidth(980)
+        center_col.setMinimumWidth(0)
+        center_col.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        layout = QVBoxLayout(center_col)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
 
         # Playlist tabs row (Identified Songs, Liked Songs, custom playlists, + New Playlist)
         pl_bar = QHBoxLayout()
@@ -909,6 +958,7 @@ class SongPulseWindow(QMainWindow):
         sel_row.setContentsMargins(6, 2, 4, 0)
         sel_row.setSpacing(8)
         self.select_all_chk = QCheckBox("Select All")
+        self.select_all_chk.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.select_all_chk.setStyleSheet("QCheckBox { padding: 6px 10px; }")
         self.select_all_chk.setCursor(Qt.CursorShape.PointingHandCursor)
         self.select_all_chk.stateChanged.connect(self._on_select_all_toggled)
@@ -927,12 +977,12 @@ class SongPulseWindow(QMainWindow):
         layout.addLayout(self.lib_list_layout)
         layout.addStretch(1)
 
-        outer.addStretch(1)
-        outer.addWidget(center_col, 10)
-        outer.addStretch(1)
+        outer.addStretch(0)
+        outer.addWidget(center_col, 1)
+        outer.addStretch(0)
 
         self.lib_scroll = _make_clean_scroll(scroll_inner, horizontal_off=True)
-        page_lay.addWidget(self.lib_scroll)
+        page_lay.addWidget(self.lib_scroll, 1)
 
         self._rebuild_playlist_tabs()
         return page
@@ -1159,8 +1209,8 @@ class SongPulseWindow(QMainWindow):
         site_row = QHBoxLayout()
         site_row.addLayout(
             _label_with_help(
-                "Open Artist & Album On",
-                "Choose which music website opens when clicking an artist or album name in the info popup.",
+                "Preferred Music Site",
+                "Choose which music website opens when right-clicking 'Listen in' on a song or clicking an artist/album name in the info popup.",
             )
         )
         site_row.addStretch()
@@ -1852,6 +1902,7 @@ class SongPulseWindow(QMainWindow):
         self.is_pinned = False
         set_window_always_on_top(int(self.winId()), False)
         self._update_pin_button_ui()
+        self.detail_page.set_volume(int(self.settings.get("preview_volume", 50)))
         self._populate_settings_ui()
         self.apply_theme(force=True)
         self._refresh_identify_header()
@@ -1908,6 +1959,12 @@ class SongPulseWindow(QMainWindow):
             self._suppress_unsaved = True
             self.ytdlp_path_input.setText(path)
             self._suppress_unsaved = False
+
+    def _on_detail_volume_changed(self, vol: int):
+        vol = max(0, min(100, int(vol)))
+        self.settings["preview_volume"] = vol
+        self._saved_settings_snapshot["preview_volume"] = vol
+        save_settings(self._saved_settings_snapshot)
 
     # --- OPTIONAL AI MODELS & STORAGE CLEAN-UP ---
     def _all_ai_model_entries(self) -> list[dict]:
@@ -2900,10 +2957,40 @@ class SongPulseWindow(QMainWindow):
             return sorted(base, key=lambda s: (s.get("album") or "zzz").lower())
         return base
 
+    def _sync_lib_header_responsive(self):
+        if not hasattr(self, "lib_sticky_header"):
+            return
+        avail_w = max(0, self.lib_sticky_header.width() - 44)
+        count = len(self.selected_song_ids)
+        if count > 0:
+            need_full = self.lib_title_wrap.sizeHint().width() + self.batch_bar.sizeHint().width() + 24
+            hide_title = avail_w > 0 and avail_w < need_full
+            self.lib_title_wrap.setVisible(not hide_title)
+            self.batch_sel_lbl.setVisible(avail_w == 0 or avail_w >= 540)
+        else:
+            self.lib_title_wrap.setVisible(True)
+            self.batch_sel_lbl.setVisible(False)
+
     def _update_batch_ui(self):
         count = len(self.selected_song_ids)
-        self.batch_bar.setVisible(count > 0)
-        self.clear_all_btn.setVisible(count == 0 and self.active_playlist_key == "all")
+        show_batch = count > 0
+        show_clear_all = (not show_batch) and self.active_playlist_key == "all"
+
+        self.lib_sticky_header.setUpdatesEnabled(False)
+        try:
+            # Hide outgoing widget first so both are never visible simultaneously
+            if show_batch:
+                self.clear_all_btn.hide()
+                self.batch_sel_lbl.setText(f"{count} selected")
+                self.batch_bar.show()
+            else:
+                self.batch_bar.hide()
+                self.batch_sel_lbl.setText("")
+                self.clear_all_btn.setVisible(show_clear_all)
+            self._sync_lib_header_responsive()
+        finally:
+            self.lib_sticky_header.setUpdatesEnabled(True)
+
         self.selected_count_lbl.setText(f"{count} selected" if count > 0 else "")
 
         total_visible = len(self._lib_cards)
@@ -2934,13 +3021,222 @@ class SongPulseWindow(QMainWindow):
         self._update_batch_ui()
 
     def _toggle_song_liked(self, song_id: str):
+        new_liked = None
         for s in self.history:
             if s.get("id") == song_id:
-                s["liked"] = not bool(s.get("liked", False))
+                new_liked = not bool(s.get("liked", False))
+                s["liked"] = new_liked
                 save_history(self.history)
                 break
         if self.pages.currentIndex() == 1:
+            if self.active_playlist_key == "liked":
+                vbar = self.lib_scroll.verticalScrollBar()
+                scroll_pos = vbar.value()
+                self.refresh_library()
+                QTimer.singleShot(0, lambda p=scroll_pos: vbar.setValue(p))
+            elif new_liked is not None:
+                for card in self._lib_cards:
+                    if card._song_id == song_id:
+                        card.set_liked(new_liked)
+                        break
+
+    def _get_song_listen_target(self, song: dict) -> tuple[str, str, str]:
+        """Resolves (site_display_name, icon_key, url) using the user's preferred site setting."""
+        pref = (self.settings.get("preferred_info_site") or "auto").lower().strip()
+        site_names = dict(PREFERRED_INFO_SITES)
+        links = build_song_platform_links(song)
+        links_by_key = {ikey: (lbl, url) for lbl, ikey, url in links}
+
+        if pref != "auto":
+            site_label = site_names.get(pref, "YouTube")
+            icon_key = pref if pref in self.p_icons else "web"
+            if pref == "youtube" and song.get("youtube_video_url"):
+                url = song["youtube_video_url"]
+            elif pref in links_by_key:
+                url = links_by_key[pref][1]
+            else:
+                q = f"{song.get('artist', '')} {song.get('title', '')}".strip()
+                url = build_site_url("song", q, pref, get_song_link(song))
+            return site_label, icon_key, url
+
+        if song.get("youtube_video_url"):
+            return "YouTube", "youtube", song["youtube_video_url"]
+        if song.get("shazam_url"):
+            return "Shazam", "shazam", song["shazam_url"]
+        if links:
+            lbl, ikey, url = links[0]
+            return site_names.get(ikey, lbl), ikey, url
+        q = f"{song.get('artist', '')} {song.get('title', '')}".strip()
+        return "YouTube", "youtube", build_site_url("song", q, "youtube", "")
+
+    def _show_song_context_menu(self, song: dict, global_pos):
+        if not self.isActiveWindow():
+            self.raise_()
+            self.activateWindow()
+            _force_focus_window(int(self.winId()))
+            QTimer.singleShot(
+                15,
+                lambda s=song, pos=global_pos: self._open_song_context_menu_now(s, pos),
+            )
+            return
+        self._open_song_context_menu_now(song, global_pos)
+
+    def _open_song_context_menu_now(self, song: dict, global_pos):
+        song_id = song.get("id", "")
+        live_song = next((s for s in self.history if s.get("id") == song_id), song)
+        liked = bool(live_song.get("liked", False))
+        icon_col = "#D4D4D8" if self.last_dark_state else "#475569"
+
+        menu = ScrollThroughMenu(self.lib_scroll, self)
+        menu.setMinimumWidth(220)
+
+        like_icon = create_ui_icon(
+            "heart_filled" if liked else "heart",
+            "#F43F5E" if liked else icon_col,
+            14,
+        )
+        act_like = QAction(like_icon, "Unlike" if liked else "Like", menu)
+        act_like.triggered.connect(lambda checked=False, sid=song_id: self._toggle_song_liked(sid))
+        menu.addAction(act_like)
+
+        site_label, site_icon_key, listen_url = self._get_song_listen_target(live_song)
+        act_listen = QAction(
+            self.p_icons.get(site_icon_key, self.p_icons["web"]),
+            f"Listen in {site_label}",
+            menu,
+        )
+        act_listen.setEnabled(bool(listen_url))
+        act_listen.triggered.connect(
+            lambda checked=False, u=listen_url: open_external_url(u) if u else None
+        )
+        menu.addAction(act_listen)
+
+        pl_menu = ScrollThroughMenu(self.lib_scroll, menu, install_app_filter=False)
+        pl_menu.setTitle("Add to Playlist")
+        pl_menu.setIcon(create_ui_icon("playlist_add", icon_col, 14))
+        pl_menu.setMinimumWidth(185)
+        menu.addMenu(pl_menu)
+        if self.playlists:
+            for pl in self.playlists:
+                in_pl = song_id in pl.get("song_ids", [])
+                pname = pl.get("name", "Playlist")
+                act_pl = QAction(f"✓  {pname}" if in_pl else pname, pl_menu)
+                if in_pl:
+                    act_pl.setEnabled(False)
+                else:
+                    act_pl.triggered.connect(
+                        lambda checked=False, sid=song_id, pid=pl["id"]: self._add_song_to_playlist(sid, pid)
+                    )
+                pl_menu.addAction(act_pl)
+            pl_menu.addSeparator()
+
+        act_new_pl = QAction("+ Create New Playlist...", pl_menu)
+        act_new_pl.triggered.connect(
+            lambda checked=False, sid=song_id: self._create_playlist_with_song(sid)
+        )
+        pl_menu.addAction(act_new_pl)
+
+        menu.addSeparator()
+        act_dl = QAction(create_ui_icon("download", icon_col, 14), "Download", menu)
+        act_dl.triggered.connect(
+            lambda checked=False, s=live_song: self._download_single_song(s)
+        )
+        menu.addAction(act_dl)
+
+        def _on_menu_hide():
+            HistoryRowCard._suppress_next_card_click = True
+            HistoryRowCard._suppress_until = time.monotonic() + 0.18
+
+        menu.aboutToHide.connect(_on_menu_hide)
+        HistoryRowCard._context_menu_open = True
+        HistoryRowCard._suppress_next_card_click = False
+        chosen = None
+        try:
+            chosen = menu.exec(global_pos)
+        finally:
+            HistoryRowCard._context_menu_open = False
+            if chosen is not None:
+                HistoryRowCard._suppress_next_card_click = False
+            else:
+                HistoryRowCard._suppress_next_card_click = True
+                HistoryRowCard._suppress_until = time.monotonic() + 0.18
+
+    def _add_song_to_playlist(self, song_id: str, playlist_id: str):
+        pl = next((p for p in self.playlists if p.get("id") == playlist_id), None)
+        if not pl or not song_id:
+            return
+        ids = list(pl.get("song_ids", []))
+        if song_id not in ids:
+            ids.append(song_id)
+            pl["song_ids"] = ids
+            save_playlists(self.playlists)
+        self.hud.show_message(
+            f"Added to '{pl.get('name', 'Playlist')}'",
+            dark=bool(self.last_dark_state),
+            dot_color="#22C55E",
+            auto_hide_ms=2200,
+        )
+        if self.active_playlist_key == playlist_id:
             self.refresh_library()
+
+    def _create_playlist_with_song(self, song_id: str):
+        if not song_id:
+            return
+        name, ok = QInputDialog.getText(self, "New Playlist", "Playlist name:")
+        if not ok or not name.strip():
+            return
+        pl = {
+            "id": hashlib.md5(f"{name}-{time.time()}".encode()).hexdigest()[:10],
+            "name": name.strip(),
+            "song_ids": [song_id],
+            "sort_mode": "manual",
+        }
+        self.playlists.append(pl)
+        save_playlists(self.playlists)
+        self._rebuild_playlist_tabs()
+        self.hud.show_message(
+            f"Added to new playlist '{pl['name']}'",
+            dark=bool(self.last_dark_state),
+            dot_color="#22C55E",
+            auto_hide_ms=2400,
+        )
+
+    def _download_single_song(self, song: dict):
+        if not song:
+            return
+        exe_path = self._ensure_ytdlp_exe_path()
+        if not exe_path:
+            return
+
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            urls = self._resolve_songs_for_ytdlp([song])
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        if not urls:
+            QMessageBox.warning(self, "No Link Found", "Could not find a YouTube link for this song.")
+            return
+
+        quick_mp3 = bool(self.settings.get("ytdlp_quick_download_mp3", True))
+        QApplication.clipboard().setText(urls[0])
+        try:
+            launch_ytdlp_downloader(
+                exe_path,
+                urls,
+                playlist_name="",
+                quick_mp3=quick_mp3,
+                on_complete_cb=lambda folder, cnt, pl: self.ytdlp_download_finished.emit(folder, cnt, pl),
+            )
+            title = song.get("title") or "song"
+            self.hud.show_message(
+                f"Downloading '{title}' with yt-dlp Downloader",
+                dark=bool(self.last_dark_state),
+                dot_color="#22C55E",
+                auto_hide_ms=3400,
+            )
+        except Exception as e:
+            QMessageBox.warning(self, "Launch Failed", f"Could not open yt-dlp Downloader:\n{e}")
 
     def _move_playlist_song(self, song_id: str, delta: int):
         pl = self._get_active_custom_playlist()
@@ -2974,7 +3270,7 @@ class SongPulseWindow(QMainWindow):
     def _show_batch_add_playlist_menu(self):
         if not self.selected_song_ids:
             return
-        menu = QMenu(self)
+        menu = ScrollThroughMenu(self.lib_scroll, self)
         act_like = QAction("Liked Songs", menu)
         act_like.triggered.connect(self._add_selected_to_liked)
         menu.addAction(act_like)
@@ -3214,6 +3510,8 @@ class SongPulseWindow(QMainWindow):
             else ("Remove from Liked Songs" if self.active_playlist_key == "liked" else "Remove from library")
         )
         details_icon = getattr(self, "details_ui_icon", create_ui_icon("details", "#D4D4D8", 13))
+        vp_w = self.lib_scroll.viewport().width() if hasattr(self, "lib_scroll") else 0
+        init_compact = bool(vp_w > 0 and (vp_w - 52) < 680)
 
         for song in filtered:
             sid = song.get("id", "")
@@ -3226,9 +3524,11 @@ class SongPulseWindow(QMainWindow):
                 checked=sid in self.selected_song_ids,
                 allow_reorder=allow_reorder,
                 delete_tooltip=del_tip,
+                initial_compact=init_compact,
             )
             card.selection_toggled.connect(self._on_card_selection_toggled)
             card.like_toggled.connect(self._toggle_song_liked)
+            card.context_menu_requested.connect(self._show_song_context_menu)
             if allow_reorder:
                 card.move_requested.connect(self._move_playlist_song)
                 card.drop_reorder.connect(self._drop_reorder_playlist_song)

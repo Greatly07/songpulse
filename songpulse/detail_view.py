@@ -41,7 +41,7 @@ from PyQt6.QtWidgets import (
 )
 
 try:
-    from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
+    from PyQt6.QtMultimedia import QAudioOutput, QMediaDevices, QMediaPlayer
 
     HAS_MULTIMEDIA = True
 except Exception:
@@ -49,7 +49,12 @@ except Exception:
 
 from .config import TEMP_DIR, build_site_url, find_default_ytdlp_app, open_external_url, split_artists
 from .dialogs import prompt_install_or_locate_ytdlp
-from .theme import create_ui_icon, extract_cover_gradient_colors, rounded_pixmap
+from .theme import (
+    create_ui_icon,
+    create_ytdlp_icon,
+    extract_cover_gradient_colors,
+    rounded_pixmap,
+)
 from .widgets import ElidedLabel, ElidedLinkButton, FlowWidget, get_song_link
 from .workers import (
     AlbumInfoWorker,
@@ -617,6 +622,7 @@ class SongDetailPage(QWidget):
     ytdlp_path_changed = pyqtSignal(str)
     like_toggled = pyqtSignal(str)
     ytdlp_download_finished = pyqtSignal(str, int, str)
+    volume_changed = pyqtSignal(int)
 
     def __init__(self, p_icons: dict, get_settings_fn, parent=None):
         super().__init__(parent)
@@ -634,17 +640,46 @@ class SongDetailPage(QWidget):
         self._active_info_data = None
         self._seeking = False
 
+        init_vol = 50
+        try:
+            raw_vol = (self.get_settings() or {}).get("preview_volume", 50)
+            init_vol = max(0, min(100, int(raw_vol)))
+        except Exception:
+            init_vol = 50
+        self._volume_pct = init_vol
+        self._vol_save_timer = QTimer(self)
+        self._vol_save_timer.setSingleShot(True)
+        self._vol_save_timer.timeout.connect(self._flush_volume_save)
+
         self.player = None
         self.audio_output = None
+        self.media_devices = None
+        self._audio_dev_timer = None
+        self._audio_device_dirty = False
+        self._audio_switch_in_progress = False
+        self._audio_switch_seq = 0
+        self._pending_seek_pos = 0
+        self._pending_autoplay = False
+        self._error_resume_src = QUrl()
+        self._error_resume_pos = 0
+        self._error_resume_play = False
+        self._rebound_on_error = False
         if HAS_MULTIMEDIA:
             self.player = QMediaPlayer(self)
             self.audio_output = QAudioOutput(self)
-            self.audio_output.setVolume(0.75)
+            self.audio_output.setVolume(self._linear_volume(self._volume_pct))
             self.player.setAudioOutput(self.audio_output)
             self.player.positionChanged.connect(self._on_pos_changed)
             self.player.durationChanged.connect(self._on_dur_changed)
             self.player.playbackStateChanged.connect(self._on_playback_state)
+            self.player.mediaStatusChanged.connect(self._on_media_status_changed)
             self.player.errorOccurred.connect(self._on_media_error)
+
+            self._audio_dev_timer = QTimer(self)
+            self._audio_dev_timer.setSingleShot(True)
+            self._audio_dev_timer.timeout.connect(self._handle_audio_outputs_changed_debounced)
+            self.media_devices = QMediaDevices(self)
+            self.media_devices.audioOutputsChanged.connect(self._on_audio_outputs_changed)
 
         self._build_ui()
         self._build_info_popup_overlay()
@@ -674,7 +709,9 @@ class SongDetailPage(QWidget):
         self.like_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.like_btn.clicked.connect(self._on_like_clicked)
 
-        self.ytdlp_btn = QPushButton("⬇  Download with yt-dlp")
+        self.ytdlp_btn = QPushButton(" Download with yt-dlp")
+        self.ytdlp_btn.setIcon(create_ytdlp_icon(16))
+        self.ytdlp_btn.setIconSize(QSize(15, 15))
         self.ytdlp_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.ytdlp_btn.clicked.connect(self._on_download_ytdlp)
 
@@ -802,9 +839,11 @@ class SongDetailPage(QWidget):
         self.vol_lbl = QLabel("Vol")
         self.vol_slider = QSlider(Qt.Orientation.Horizontal)
         self.vol_slider.setRange(0, 100)
-        self.vol_slider.setValue(75)
+        self.vol_slider.setValue(self._volume_pct)
+        self.vol_slider.setToolTip(f"Volume: {self._volume_pct}%")
         self.vol_slider.setFixedWidth(68)
         self.vol_slider.valueChanged.connect(self._on_volume_changed)
+        self.vol_slider.sliderReleased.connect(self._flush_volume_save)
 
         controls_row.addWidget(self.play_btn)
         controls_row.addWidget(self.time_cur_lbl)
@@ -1610,10 +1649,21 @@ class SongDetailPage(QWidget):
     def _play_custom_preview(self, preview_url: str, title: str):
         if not HAS_MULTIMEDIA or not self.player or not preview_url:
             return
-        self.player.stop()
-        self.player.setSource(QUrl(preview_url))
+        self._rebound_on_error = False
         self.play_btn.setEnabled(True)
         self.pl_status.setText(f"Previewing: {title}")
+        target_url = QUrl(preview_url)
+        if self._needs_audio_device_sync():
+            self._switch_audio_device_safe(
+                target_source=target_url,
+                resume_pos=0,
+                autoplay=True,
+            )
+            return
+        self.player.stop()
+        if self.audio_output:
+            self.audio_output.setVolume(self._linear_volume(self._volume_pct))
+        self.player.setSource(target_url)
         self.player.play()
 
     def _copy_btn_feedback(self, btn, text):
@@ -1644,10 +1694,128 @@ class SongDetailPage(QWidget):
             self.play_btn.setEnabled(False)
         self.song_updated.emit(song_id, updates)
 
+    @staticmethod
+    def _linear_volume(pct: int) -> float:
+        """Converts perceptual slider percentage (0..100) to linear QAudioOutput amplitude (cubic curve)."""
+        x = max(0.0, min(1.0, float(pct) / 100.0))
+        return x * x * x
+
+    def _on_audio_outputs_changed(self):
+        self._audio_device_dirty = True
+        if self._audio_dev_timer is not None:
+            self._audio_dev_timer.start(450)
+
+    def _needs_audio_device_sync(self) -> bool:
+        if not HAS_MULTIMEDIA or self.audio_output is None:
+            return False
+        if self._audio_device_dirty:
+            return True
+        try:
+            default_dev = QMediaDevices.defaultAudioOutput()
+            cur_dev = self.audio_output.device()
+            if default_dev.isNull():
+                return False
+            return cur_dev.isNull() or cur_dev.id() != default_dev.id()
+        except Exception:
+            return False
+
+    def _handle_audio_outputs_changed_debounced(self):
+        if not HAS_MULTIMEDIA or self.player is None or self.audio_output is None:
+            return
+        err_play = self._error_resume_play
+        err_src = QUrl(self._error_resume_src)
+        err_pos = self._error_resume_pos
+        self._error_resume_play = False
+        self._error_resume_src = QUrl()
+        self._error_resume_pos = 0
+
+        # If the detail page isn't actively playing or showing a loaded preview, defer the switch
+        # until the next song load or Play press so unloading virtual drivers (e.g. FxSound) cannot crash Qt.
+        cur_src = self.player.source()
+        if cur_src.isEmpty() and not err_src.isEmpty():
+            cur_src = err_src
+        if not self.isVisible() or cur_src.isEmpty():
+            self._audio_device_dirty = True
+            return
+        if not self._needs_audio_device_sync() and not err_play:
+            return
+        was_playing = (
+            self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+            or err_play
+        )
+        cur_pos = err_pos if err_play else (self.player.position() if was_playing else 0)
+        self._switch_audio_device_safe(
+            target_source=cur_src,
+            resume_pos=cur_pos,
+            autoplay=was_playing,
+        )
+
+    def _switch_audio_device_safe(
+        self,
+        target_source: QUrl | None = None,
+        resume_pos: int = 0,
+        autoplay: bool = False,
+    ):
+        """Two-phase async device switch: stops and clears source BEFORE calling QAudioOutput.setDevice()."""
+        if not HAS_MULTIMEDIA or self.player is None or self.audio_output is None:
+            return
+        self._audio_switch_seq += 1
+        seq = self._audio_switch_seq
+        self._audio_switch_in_progress = True
+
+        # Phase 1: Stop & detach media source so FFmpeg's WASAPI sink shuts down cleanly
+        try:
+            self.player.stop()
+            self.player.setSource(QUrl())
+        except Exception:
+            pass
+
+        src_copy = QUrl(target_source) if target_source is not None else QUrl()
+
+        def _phase2_apply():
+            if seq != self._audio_switch_seq or self.player is None or self.audio_output is None:
+                return
+            try:
+                default_dev = QMediaDevices.defaultAudioOutput()
+                if not default_dev.isNull():
+                    self.audio_output.setDevice(default_dev)
+                self.audio_output.setVolume(self._linear_volume(self._volume_pct))
+                self._audio_device_dirty = False
+            except Exception:
+                pass
+            finally:
+                self._audio_switch_in_progress = False
+
+            if not src_copy.isEmpty():
+                self._pending_seek_pos = max(0, int(resume_pos))
+                self._pending_autoplay = bool(autoplay)
+                self.player.setSource(src_copy)
+                if autoplay:
+                    self.player.play()
+
+        QTimer.singleShot(140, _phase2_apply)
+
+    def _on_media_status_changed(self, status):
+        if status in (
+            QMediaPlayer.MediaStatus.LoadedMedia,
+            QMediaPlayer.MediaStatus.BufferedMedia,
+        ):
+            if self._pending_seek_pos > 0 and self.player is not None:
+                pos = self._pending_seek_pos
+                self._pending_seek_pos = 0
+                self.player.setPosition(pos)
+            if self._pending_autoplay and self.player is not None:
+                self._pending_autoplay = False
+                if self.player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
+                    self.player.play()
+
     def _setup_audio_source(self):
         self.seek_slider.setValue(0)
         self.time_cur_lbl.setText("0:00")
         self.time_tot_lbl.setText("0:30")
+        self._rebound_on_error = False
+        self._pending_seek_pos = 0
+        self._pending_autoplay = False
 
         if not HAS_MULTIMEDIA or self.player is None:
             self.pl_status.setText("Use Full Player")
@@ -1656,22 +1824,53 @@ class SongDetailPage(QWidget):
 
         url = (self.song or {}).get("preview_url", "")
         if url:
-            self.player.setSource(QUrl(url))
             self.play_btn.setEnabled(True)
             self.pl_status.setText("30s preview ready")
+            if self._needs_audio_device_sync():
+                self._switch_audio_device_safe(
+                    target_source=QUrl(url),
+                    resume_pos=0,
+                    autoplay=False,
+                )
+                return
+            if self.audio_output:
+                self.audio_output.setVolume(self._linear_volume(self._volume_pct))
+            self.player.setSource(QUrl(url))
         else:
             self.play_btn.setEnabled(False)
             self.pl_status.setText("Loading preview...")
 
     def _toggle_play(self):
-        if not self.player:
+        if not self.player or self._audio_switch_in_progress:
             return
         if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.player.pause()
         else:
+            self._rebound_on_error = False
+            if self._needs_audio_device_sync():
+                cur_src = self.player.source()
+                if cur_src.isEmpty():
+                    url = (self.song or {}).get("preview_url", "")
+                    if url:
+                        cur_src = QUrl(url)
+                if not cur_src.isEmpty():
+                    self._switch_audio_device_safe(
+                        target_source=cur_src,
+                        resume_pos=self.player.position(),
+                        autoplay=True,
+                    )
+                    return
+            if self.audio_output:
+                self.audio_output.setVolume(self._linear_volume(self._volume_pct))
             self.player.play()
 
     def stop_audio(self):
+        self._audio_switch_seq += 1
+        self._audio_switch_in_progress = False
+        self._pending_seek_pos = 0
+        self._pending_autoplay = False
+        if self._vol_save_timer.isActive():
+            self._flush_volume_save()
         if self.player:
             try:
                 self.player.stop()
@@ -1693,9 +1892,30 @@ class SongDetailPage(QWidget):
         if self.player:
             self.player.setPosition(self.seek_slider.value())
 
-    def _on_volume_changed(self, val: int):
+    def set_volume(self, val: int):
+        val = max(0, min(100, int(val)))
+        self._volume_pct = val
         if self.audio_output:
-            self.audio_output.setVolume(val / 100.0)
+            self.audio_output.setVolume(self._linear_volume(val))
+        if hasattr(self, "vol_slider"):
+            self.vol_slider.blockSignals(True)
+            self.vol_slider.setValue(val)
+            self.vol_slider.blockSignals(False)
+            self.vol_slider.setToolTip(f"Volume: {val}%")
+
+    def _flush_volume_save(self):
+        if self._vol_save_timer.isActive():
+            self._vol_save_timer.stop()
+        self.volume_changed.emit(self._volume_pct)
+
+    def _on_volume_changed(self, val: int):
+        val = max(0, min(100, int(val)))
+        self._volume_pct = val
+        if hasattr(self, "vol_slider"):
+            self.vol_slider.setToolTip(f"Volume: {val}%")
+        if self.audio_output:
+            self.audio_output.setVolume(self._linear_volume(val))
+        self._vol_save_timer.start(250)
 
     def _on_playback_state(self, state):
         playing = state == QMediaPlayer.PlaybackState.PlayingState
@@ -1709,6 +1929,16 @@ class SongDetailPage(QWidget):
             self.pl_status.setText("30s preview ready")
 
     def _on_media_error(self, _err, err_str):
+        if not self._rebound_on_error and self.player is not None and not self.player.source().isEmpty():
+            self._rebound_on_error = True
+            self._audio_device_dirty = True
+            self._error_resume_src = QUrl(self.player.source())
+            self._error_resume_pos = self.player.position()
+            self._error_resume_play = True
+            # Defer recovery out of QMediaPlayer's error callback via unified debounced timer
+            if self._audio_dev_timer is not None:
+                self._audio_dev_timer.start(450)
+            return
         self.pl_status.setText(f"Preview unavailable ({err_str or 'error'})")
 
     def _on_download_ytdlp(self):

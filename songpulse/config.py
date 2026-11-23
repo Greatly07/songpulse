@@ -258,6 +258,7 @@ DEFAULT_SETTINGS = {
     "gpu_threshold": 65,
     "ytdlp_app_path": "",
     "ytdlp_quick_download_mp3": True,
+    "preview_volume": 50,
 }
 
 

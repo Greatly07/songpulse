@@ -1,7 +1,11 @@
+import ctypes
+import ctypes.wintypes
 import math
+import time
 import webbrowser
 
 from PyQt6.QtCore import (
+    QAbstractNativeEventFilter,
     QEvent,
     QMimeData,
     QPoint,
@@ -548,6 +552,107 @@ class ClickableCard(QFrame):
         super().leaveEvent(event)
 
 
+class _WinWheelNativeFilter(QAbstractNativeEventFilter):
+    """Intercepts Windows WM_MOUSEWHEEL at the OS message loop while a popup menu is open."""
+
+    def __init__(self, on_wheel_delta):
+        super().__init__()
+        self._on_wheel_delta = on_wheel_delta
+
+    def nativeEventFilter(self, eventType, message):
+        if eventType in (b"windows_generic_MSG", b"windows_dispatcher_MSG"):
+            try:
+                msg = ctypes.wintypes.MSG.from_address(int(message))
+                if msg.message == 0x020A:  # WM_MOUSEWHEEL
+                    delta = ctypes.c_short((int(msg.wParam) >> 16) & 0xFFFF).value
+                    if delta != 0 and self._on_wheel_delta(delta):
+                        return True, 0
+            except Exception:
+                pass
+        return False, 0
+
+
+class ScrollThroughMenu(QMenu):
+    """QMenu that keeps a target QScrollArea scrollable with the mouse wheel while open."""
+
+    def __init__(
+        self,
+        scroll_area: QScrollArea | None = None,
+        parent=None,
+        install_app_filter: bool = True,
+    ):
+        super().__init__(parent)
+        self._scroll_area = scroll_area
+        self._install_app_filter = bool(install_app_filter)
+        self._native_filter = None
+        self._filter_installed = False
+
+    def _scroll_by_angle_delta(self, ang_dy: int) -> bool:
+        if self._scroll_area is None or ang_dy == 0:
+            return False
+        vbar = self._scroll_area.verticalScrollBar()
+        if vbar is None or vbar.maximum() <= vbar.minimum():
+            return False
+        step = max(20, vbar.singleStep()) * max(1, QApplication.wheelScrollLines())
+        px = int(round((ang_dy / 120.0) * step))
+        if px == 0:
+            px = 1 if ang_dy > 0 else -1
+        vbar.setValue(vbar.value() - px)
+        return True
+
+    def _on_native_wheel(self, delta: int) -> bool:
+        if not self.isVisible() or self._scroll_area is None:
+            return False
+        return self._scroll_by_angle_delta(delta)
+
+    def _scroll_from_wheel(self, event) -> bool:
+        if self._scroll_area is None:
+            return False
+        vbar = self._scroll_area.verticalScrollBar()
+        if vbar is None or vbar.maximum() <= vbar.minimum():
+            return False
+        pix_dy = event.pixelDelta().y()
+        if pix_dy != 0:
+            vbar.setValue(vbar.value() - pix_dy)
+            event.accept()
+            return True
+        ang_dy = event.angleDelta().y()
+        if ang_dy != 0 and self._scroll_by_angle_delta(ang_dy):
+            event.accept()
+            return True
+        return False
+
+    def _detach_wheel_filter(self):
+        if self._filter_installed and self._native_filter is not None:
+            app = QApplication.instance()
+            if app is not None:
+                app.removeNativeEventFilter(self._native_filter)
+            self._filter_installed = False
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._install_app_filter and not self._filter_installed and self._scroll_area is not None:
+            app = QApplication.instance()
+            if app is not None:
+                if self._native_filter is None:
+                    self._native_filter = _WinWheelNativeFilter(self._on_native_wheel)
+                app.installNativeEventFilter(self._native_filter)
+                self._filter_installed = True
+
+    def hideEvent(self, event):
+        self._detach_wheel_filter()
+        super().hideEvent(event)
+
+    def closeEvent(self, event):
+        self._detach_wheel_filter()
+        super().closeEvent(event)
+
+    def wheelEvent(self, event):
+        if self._scroll_from_wheel(event):
+            return
+        super().wheelEvent(event)
+
+
 class _CheckboxHitArea(QWidget):
     """Expands clickable hitbox around a small QCheckBox without enlarging the visual box."""
 
@@ -569,6 +674,13 @@ class _CheckboxHitArea(QWidget):
             return
         super().mousePressEvent(event)
 
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.chk.toggle()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             event.accept()
@@ -583,6 +695,21 @@ class HistoryRowCard(QFrame):
     like_toggled = pyqtSignal(str)
     move_requested = pyqtSignal(str, int)  # (song_id, -1 up or +1 down)
     drop_reorder = pyqtSignal(str, str)  # (dragged_song_id, target_song_id)
+    context_menu_requested = pyqtSignal(dict, QPoint)
+
+    _context_menu_open = False
+    _suppress_next_card_click = False
+    _suppress_until = 0.0
+
+    @classmethod
+    def should_suppress_card_click(cls) -> bool:
+        if cls._context_menu_open:
+            return True
+        if cls._suppress_next_card_click and time.monotonic() < cls._suppress_until:
+            cls._suppress_next_card_click = False
+            return True
+        cls._suppress_next_card_click = False
+        return False
 
     def __init__(
         self,
@@ -594,6 +721,7 @@ class HistoryRowCard(QFrame):
         checked=False,
         allow_reorder=False,
         delete_tooltip="Remove from library",
+        initial_compact=False,
         parent=None,
     ):
         super().__init__(parent)
@@ -615,6 +743,8 @@ class HistoryRowCard(QFrame):
         self._on_details = on_details
         self._allow_reorder = bool(allow_reorder)
         self._drag_start_pos = None
+        self._right_press_pos = None
+        self._last_ctx_ts = 0.0
         self.setAcceptDrops(self._allow_reorder)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
@@ -624,6 +754,7 @@ class HistoryRowCard(QFrame):
 
         # Selection checkbox
         self.select_chk = QCheckBox()
+        self.select_chk.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.select_chk.setChecked(checked)
         self.select_chk.setFixedSize(16, 16)
         self.select_chk.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -750,7 +881,11 @@ class HistoryRowCard(QFrame):
         self.details_btn.setIconSize(QSize(13, 13))
         self.details_btn.setToolTip("View song details")
         self.details_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.details_btn.clicked.connect(lambda checked=False: on_details(song))
+        self.details_btn.clicked.connect(
+            lambda checked=False: None
+            if HistoryRowCard.should_suppress_card_click()
+            else on_details(song)
+        )
         row.addWidget(self.details_btn)
 
         del_btn = QPushButton("✕")
@@ -761,7 +896,19 @@ class HistoryRowCard(QFrame):
         del_btn.clicked.connect(lambda checked=False: on_delete(self._song_id))
         row.addWidget(del_btn)
 
-        self._apply_compact_mode(False)
+        self._apply_compact_mode(bool(initial_compact))
+
+    def set_liked(self, liked: bool):
+        liked = bool(liked)
+        self._song["liked"] = liked
+        self.like_btn.setText("♥" if liked else "♡")
+        self.like_btn.setToolTip(
+            "Remove from Liked Songs" if liked else "Add to Liked Songs"
+        )
+        if liked:
+            self.like_btn.setStyleSheet("color: #F43F5E; font-size: 15px;")
+        else:
+            self.like_btn.setStyleSheet("font-size: 15px;")
 
     def set_checked_silent(self, checked: bool):
         self.select_chk.blockSignals(True)
@@ -770,7 +917,13 @@ class HistoryRowCard(QFrame):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self._apply_compact_mode(self.width() < 680)
+        w = self.width()
+        if self._compact is None:
+            self._apply_compact_mode(w < 680)
+        elif self._compact and w > 696:
+            self._apply_compact_mode(False)
+        elif not self._compact and w < 664:
+            self._apply_compact_mode(True)
 
     def _apply_compact_mode(self, compact: bool):
         if compact == self._compact:
@@ -798,9 +951,24 @@ class HistoryRowCard(QFrame):
             self.details_btn.setMinimumSize(0, 28)
             self.details_btn.setMaximumSize(16777215, 28)
 
+    def _emit_context_menu(self, global_pos: QPoint):
+        now = time.monotonic()
+        if now - self._last_ctx_ts < 0.25:
+            return
+        self._last_ctx_ts = now
+        self.context_menu_requested.emit(self._song, global_pos)
+
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
+            if HistoryRowCard.should_suppress_card_click():
+                self._drag_start_pos = None
+                event.accept()
+                return
             self._drag_start_pos = event.position().toPoint()
+            return
+        if event.button() == Qt.MouseButton.RightButton:
+            self._right_press_pos = event.globalPosition().toPoint()
+            event.accept()
             return
         super().mousePressEvent(event)
 
@@ -822,11 +990,24 @@ class HistoryRowCard(QFrame):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.RightButton:
+            pos = event.globalPosition().toPoint()
+            had_press = self._right_press_pos is not None
+            self._right_press_pos = None
+            event.accept()
+            if had_press:
+                self._emit_context_menu(pos)
+            return
         if event.button() == Qt.MouseButton.LeftButton and self._drag_start_pos is not None:
             self._drag_start_pos = None
-            self._on_details(self._song)
+            if not HistoryRowCard._context_menu_open:
+                self._on_details(self._song)
             return
         super().mouseReleaseEvent(event)
+
+    def contextMenuEvent(self, event):
+        self._emit_context_menu(event.globalPos())
+        event.accept()
 
     def dragEnterEvent(self, event):
         if self._allow_reorder and event.mimeData().hasFormat("application/x-songpulse-id"):

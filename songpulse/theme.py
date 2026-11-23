@@ -17,7 +17,7 @@ from PyQt6.QtGui import (
     QPolygonF,
 )
 
-from .config import ICON_COLOR_PRESETS, ICONS_DIR, resolve_cover_path
+from .config import APP_DIR, ICON_COLOR_PRESETS, ICONS_DIR, resolve_cover_path
 
 
 def resolve_icon_colors(icon_color_key: str = "theme", theme_cfg: dict | None = None) -> tuple[str, str]:
@@ -254,9 +254,42 @@ def create_ui_icon(kind: str, color_hex="#E4E4E7", size=16):
             p.setBrush(QBrush(QColor(color_hex)))
             p.setPen(Qt.PenStyle.NoPen)
         p.drawPath(path)
+    elif kind == "download":
+        p.drawLine(QPointF(s * 0.50, s * 0.18), QPointF(s * 0.50, s * 0.66))
+        p.drawPolyline(
+            QPolygonF(
+                [
+                    QPointF(s * 0.30, s * 0.48),
+                    QPointF(s * 0.50, s * 0.68),
+                    QPointF(s * 0.70, s * 0.48),
+                ]
+            )
+        )
+        p.drawLine(QPointF(s * 0.20, s * 0.84), QPointF(s * 0.80, s * 0.84))
+    elif kind == "playlist_add":
+        p.drawLine(QPointF(s * 0.16, s * 0.28), QPointF(s * 0.68, s * 0.28))
+        p.drawLine(QPointF(s * 0.16, s * 0.52), QPointF(s * 0.56, s * 0.52))
+        p.drawLine(QPointF(s * 0.16, s * 0.76), QPointF(s * 0.46, s * 0.76))
+        p.drawLine(QPointF(s * 0.74, s * 0.56), QPointF(s * 0.74, s * 0.86))
+        p.drawLine(QPointF(s * 0.59, s * 0.71), QPointF(s * 0.89, s * 0.71))
 
     p.end()
     return QIcon(pix)
+
+
+def create_ytdlp_icon(size: int = 16) -> QIcon:
+    """Loads the bundled official yt-dlp .ico asset for download buttons."""
+    candidates = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "yt-dlp.ico"),
+        os.path.join(APP_DIR, "_internal", "songpulse", "assets", "yt-dlp.ico"),
+        os.path.join(APP_DIR, "songpulse", "assets", "yt-dlp.ico"),
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            icon = QIcon(path)
+            if not icon.isNull():
+                return icon
+    return create_ui_icon("download", "#E4E4E7", size)
 
 
 def create_platform_icon(kind: str, size=14):
@@ -926,6 +959,36 @@ QPushButton#PlatformBtn::menu-indicator {{
     image: none;
     width: 0px;
 }}
+QPushButton#StickyActionBtn {{
+    background-color: {'rgba(255, 255, 255, 0.10)' if dark else 'rgba(15, 23, 42, 0.06)'};
+    color: {c['btn_fg']};
+    border: 1px solid {'rgba(255, 255, 255, 0.22)' if dark else 'rgba(15, 23, 42, 0.20)'};
+    border-radius: 8px;
+    padding: 4px 11px;
+    font-size: 11px;
+    font-weight: 600;
+}}
+QPushButton#StickyActionBtn:hover {{
+    background-color: {'rgba(255, 255, 255, 0.18)' if dark else 'rgba(15, 23, 42, 0.12)'};
+    border-color: {accent};
+}}
+QPushButton#StickyActionBtn::menu-indicator {{
+    image: none;
+    width: 0px;
+}}
+QPushButton#StickyDangerBtn {{
+    background-color: {'rgba(239, 68, 68, 0.11)' if dark else 'rgba(220, 38, 38, 0.07)'};
+    color: {c['danger_fg']};
+    border: 1px solid {'rgba(248, 113, 113, 0.45)' if dark else 'rgba(220, 38, 38, 0.38)'};
+    border-radius: 8px;
+    padding: 4px 11px;
+    font-size: 11px;
+    font-weight: 600;
+}}
+QPushButton#StickyDangerBtn:hover {{
+    background-color: {c['danger_hover']};
+    border-color: {c['danger_fg']};
+}}
 QPushButton#SubtleIconBtn {{
     background: transparent;
     border: 1px solid transparent;
@@ -1047,17 +1110,32 @@ QMenu {{
     background-color: {c['menu_bg']};
     color: {c['fg']};
     border: 1px solid {c['btn_b']};
-    border-radius: 8px;
-    padding: 4px;
+    border-radius: 10px;
+    padding: 8px;
 }}
 QMenu::item {{
-    padding: 6px 14px;
-    border-radius: 5px;
+    padding: 8px 28px 8px 14px;
+    margin: 2px 0px;
+    border-radius: 6px;
     font-size: 12px;
 }}
 QMenu::item:selected {{
     background-color: {accent};
     color: {ac_text};
+}}
+QMenu::item:disabled {{
+    color: {c['muted']};
+}}
+QMenu::icon {{
+    padding-left: 8px;
+}}
+QMenu::separator {{
+    height: 1px;
+    background-color: {c['btn_b']};
+    margin: 6px 8px;
+}}
+QMenu::right-arrow {{
+    margin-right: 6px;
 }}
 QToolTip {{
     background-color: {c['menu_bg']};
