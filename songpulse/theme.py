@@ -1225,6 +1225,54 @@ QDialog {{
     background-color: {c['bg']};
     color: {c['fg']};
 }}
+QColorDialog QLabel {{
+    color: {c['fg']};
+    font-size: 13px;
+    font-weight: 500;
+    padding: 2px 4px 2px 2px;
+}}
+QColorDialog QSpinBox {{
+    background-color: {c['inp_bg']};
+    color: {c['fg']};
+    border: 1px solid {c['inp_b']};
+    border-radius: 7px;
+    padding: 3px 22px 3px 8px;
+    font-size: 13px;
+    min-height: 22px;
+}}
+QColorDialog QSpinBox QLineEdit {{
+    padding: 0px 2px;
+    border: none;
+    background: transparent;
+    font-size: 13px;
+}}
+QColorDialog QLineEdit {{
+    background-color: {c['inp_bg']};
+    color: {c['fg']};
+    border: 1px solid {c['inp_b']};
+    border-radius: 7px;
+    padding: 3px 8px;
+    font-size: 13px;
+    min-height: 22px;
+}}
+QColorDialog QPushButton {{
+    background-color: {c['btn_bg']};
+    color: {c['btn_fg']};
+    border: 1px solid {c['btn_b']};
+    border-radius: 7px;
+    padding: 6px 14px;
+    font-size: 13px;
+    font-weight: 600;
+    min-height: 26px;
+}}
+QColorDialog QPushButton:hover {{
+    background-color: {c['btn_hover']};
+    border-color: {accent};
+}}
+QColorDialog QDialogButtonBox QPushButton {{
+    padding: 6px 26px;
+    min-width: 88px;
+}}
 QProgressBar {{
     background-color: {c['inp_bg']};
     color: {c['fg']};

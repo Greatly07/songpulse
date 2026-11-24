@@ -31,6 +31,8 @@ from .config import (
     SAMPLE_RATE,
     SAVED_CLIP_WAV,
     TEMP_DIR,
+    THEME_PHOTOS_DIR,
+    THEMES_DIR,
     TOOLS_DIR,
     UVR_MODEL_NAME,
     YTDLP_GITHUB_REPO,
@@ -49,6 +51,7 @@ from .config import (
     setup_runtime_paths,
     split_artists,
 )
+from .themes_manager import theme_slug
 
 
 def _create_shazam(attempts: int = 1, max_timeout: float = 1.5) -> Shazam:
@@ -2269,3 +2272,171 @@ class SongDetailEnrichWorker(QThread):
 
         if updates:
             self.enriched.emit(song_id, updates)
+
+
+_PRESET_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif")
+
+
+def _fetch_github_tree_payload() -> dict:
+    headers = {
+        "User-Agent": f"{APP_NAME}/{APP_VERSION}",
+        "Accept": "application/vnd.github+json",
+    }
+    last_err = None
+    for branch in ("main", "HEAD"):
+        api_url = f"https://api.github.com/repos/{GITHUB_REPO}/git/trees/{branch}?recursive=1"
+        try:
+            req = urllib.request.Request(api_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            last_err = e
+            if e.code == 404 and branch == "main":
+                continue
+            raise
+    if last_err:
+        raise last_err
+    return {}
+
+
+def _download_github_raw(tree_sha: str, rel_path: str, timeout: int = 15) -> bytes:
+    encoded = urllib.parse.quote(rel_path, safe="/")
+    url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{tree_sha}/{encoded}"
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": f"{APP_NAME}/{APP_VERSION}"},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read()
+
+
+class GithubPresetsCatalogWorker(QThread):
+    """Discovers available & undownloaded custom theme presets from GitHub custom_themes/."""
+
+    catalog_ready = pyqtSignal(list)
+    error = pyqtSignal(str)
+
+    def run(self):
+        try:
+            data = _fetch_github_tree_payload()
+            tree_sha = str(data.get("sha") or "main")
+            tree = data.get("tree") or []
+
+            presets: dict[str, dict] = {}
+            for item in tree:
+                if item.get("type") != "blob":
+                    continue
+                rel = str(item.get("path") or "")
+                parts = rel.split("/")
+                if len(parts) < 3 or parts[0] != "custom_themes":
+                    continue
+                raw_slug = parts[1]
+                if not raw_slug or raw_slug.startswith((".", "_")):
+                    continue
+                fname = parts[-1]
+                if not fname or fname.startswith((".", "_")):
+                    continue
+
+                entry = presets.setdefault(raw_slug, {"jsons": [], "photos": []})
+                if len(parts) == 3 and fname.lower().endswith(".json"):
+                    entry["jsons"].append(rel)
+                elif fname.lower().endswith(_PRESET_IMAGE_EXTS) and (
+                    len(parts) == 3 or (len(parts) == 4 and parts[2].lower() == "photos")
+                ):
+                    entry["photos"].append(rel)
+
+            available: list[dict] = []
+            for raw_slug in sorted(presets.keys(), key=str.lower):
+                info = presets[raw_slug]
+                jsons = sorted(info["jsons"], key=str.lower)
+                if not jsons:
+                    continue
+                preferred = f"custom_themes/{raw_slug}/{raw_slug}.json".lower()
+                json_rel = next((j for j in jsons if j.lower() == preferred), jsons[0])
+
+                slug = theme_slug(raw_slug)
+                dest_json = os.path.join(THEMES_DIR, f"{slug}.json")
+                if os.path.isfile(dest_json):
+                    continue
+
+                json_bytes = _download_github_raw(tree_sha, json_rel, timeout=15)
+                parsed = json.loads(json_bytes.decode("utf-8"))
+                if not isinstance(parsed, dict):
+                    continue
+                colors = parsed.get("colors") if isinstance(parsed.get("colors"), dict) else {}
+                available.append(
+                    {
+                        "slug": slug,
+                        "name": str(parsed.get("name") or slug).strip(),
+                        "base_dark": bool(parsed.get("base_dark", True)),
+                        "accent": str(colors.get("accent") or "#38BDF8"),
+                        "accent_secondary": str(colors.get("accent_secondary") or colors.get("accent") or "#8B5CF6"),
+                        "tree_sha": tree_sha,
+                        "json_rel": json_rel,
+                        "photos": list(info["photos"]),
+                        "raw_json_bytes": json_bytes,
+                    }
+                )
+
+            self.catalog_ready.emit(available)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class GithubPresetsInstallWorker(QThread):
+    """Downloads and installs only the user-selected custom theme presets from GitHub."""
+
+    progress = pyqtSignal(int, str)
+    finished_install = pyqtSignal(list, str)
+
+    def __init__(self, selected_presets: list[dict], parent=None):
+        super().__init__(parent)
+        self.selected_presets = list(selected_presets or [])
+
+    def run(self):
+        installed_names: list[str] = []
+        try:
+            os.makedirs(THEMES_DIR, exist_ok=True)
+            os.makedirs(THEME_PHOTOS_DIR, exist_ok=True)
+
+            total_steps = sum(1 + len(p.get("photos") or []) for p in self.selected_presets)
+            done = 0
+
+            for preset in self.selected_presets:
+                slug = str(preset.get("slug") or "").strip()
+                name = str(preset.get("name") or slug).strip()
+                tree_sha = str(preset.get("tree_sha") or "main")
+                photos = list(preset.get("photos") or [])
+
+                for photo_rel in photos:
+                    photo_name = os.path.basename(photo_rel)
+                    dest_photo = os.path.join(THEME_PHOTOS_DIR, photo_name)
+                    pct = int((done * 100) / max(1, total_steps))
+                    self.progress.emit(pct, f"Downloading {name}: {photo_name}...")
+                    if not (os.path.isfile(dest_photo) and os.path.getsize(dest_photo) > 0):
+                        raw_bytes = _download_github_raw(tree_sha, photo_rel, timeout=15)
+                        tmp_photo = f"{dest_photo}.tmp"
+                        with open(tmp_photo, "wb") as pf:
+                            pf.write(raw_bytes)
+                        os.replace(tmp_photo, dest_photo)
+                    done += 1
+
+                pct = int((done * 100) / max(1, total_steps))
+                self.progress.emit(pct, f"Installing {name}...")
+                json_bytes = preset.get("raw_json_bytes")
+                if not json_bytes:
+                    json_bytes = _download_github_raw(tree_sha, str(preset.get("json_rel") or ""), timeout=15)
+                parsed = json.loads(json_bytes.decode("utf-8"))
+                if isinstance(parsed, dict):
+                    dest_json = os.path.join(THEMES_DIR, f"{slug}.json")
+                    tmp_json = f"{dest_json}.tmp"
+                    with open(tmp_json, "wb") as jf:
+                        jf.write(json_bytes)
+                    os.replace(tmp_json, dest_json)
+                    installed_names.append(str(parsed.get("name") or name).strip())
+                done += 1
+
+            self.progress.emit(100, "Done!")
+            self.finished_install.emit(installed_names, "")
+        except Exception as e:
+            self.finished_install.emit(installed_names, str(e))

@@ -1,3 +1,4 @@
+import copy
 import ctypes
 import datetime
 import importlib.util
@@ -282,7 +283,7 @@ DEFAULT_SETTINGS = {
 
 
 def load_settings():
-    data = DEFAULT_SETTINGS.copy()
+    data = copy.deepcopy(DEFAULT_SETTINGS)
     if os.path.exists(SETTINGS_FILE):
         try:
             with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
@@ -1142,7 +1143,7 @@ def set_startup_enabled(enable: bool):
         )
         if enable:
             if IS_FROZEN:
-                cmd = f'"{sys.executable}" --tray'
+                cmd = f'"{sys.executable}"'
             else:
                 exe = sys.executable
                 if exe.lower().endswith("python.exe"):
@@ -1150,7 +1151,7 @@ def set_startup_enabled(enable: bool):
                     if os.path.exists(pyw):
                         exe = pyw
                 entry = os.path.join(APP_DIR, "songpulse_app.pyw")
-                cmd = f'"{exe}" "{entry}" --tray'
+                cmd = f'"{exe}" "{entry}"'
             winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, cmd)
         else:
             try:
@@ -1161,6 +1162,29 @@ def set_startup_enabled(enable: bool):
         return True
     except Exception:
         return False
+
+
+def migrate_startup_command():
+    """Removes legacy --tray flag from an existing Windows startup Run entry."""
+    key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    try:
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            key_path,
+            0,
+            winreg.KEY_READ | winreg.KEY_SET_VALUE,
+        )
+        try:
+            val, val_type = winreg.QueryValueEx(key, APP_NAME)
+            if isinstance(val, str) and re.search(r"\s+--tray\s*$", val, flags=re.IGNORECASE):
+                cleaned = re.sub(r"\s+--tray\s*$", "", val, flags=re.IGNORECASE)
+                winreg.SetValueEx(key, APP_NAME, 0, val_type, cleaned)
+        except FileNotFoundError:
+            pass
+        finally:
+            winreg.CloseKey(key)
+    except Exception:
+        pass
 
 
 def set_windows_titlebar_theme(hwnd, dark: bool):

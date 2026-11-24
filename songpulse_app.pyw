@@ -17,6 +17,7 @@ from songpulse.config import (
     SINGLE_INSTANCE_KEY,
     is_windows_dark_mode,
     load_settings,
+    migrate_startup_command,
     register_uri_protocol,
     set_window_always_on_top,
     set_windows_titlebar_theme,
@@ -55,6 +56,7 @@ def main():
         sys.exit(0)
 
     register_uri_protocol()
+    migrate_startup_command()
 
     open_song_id = _extract_song_id_arg(sys.argv)
     ipc_payload = f"OPEN_SONG:{open_song_id}".encode("utf-8") if open_song_id else b"SHOW"

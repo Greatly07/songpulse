@@ -2302,6 +2302,38 @@ class SongResultPopup(QWidget):
         self.hide_timer.start(12000)
 
 
+def _delete_taskbar_tab(hwnd: int):
+    """Removes a window from the Windows taskbar via ITaskbarList::DeleteTab without changing its titlebar."""
+    try:
+        class _GUID(ctypes.Structure):
+            _fields_ = [
+                ("Data1", ctypes.c_uint32),
+                ("Data2", ctypes.c_uint16),
+                ("Data3", ctypes.c_uint16),
+                ("Data4", ctypes.c_ubyte * 8),
+            ]
+
+        clsid = _GUID(0x56FDF344, 0xFD6D, 0x11D0, (ctypes.c_ubyte * 8)(0x95, 0x8A, 0x00, 0x60, 0x97, 0xC9, 0xA0, 0x90))
+        iid = _GUID(0x56FDF342, 0xFD6D, 0x11D0, (ctypes.c_ubyte * 8)(0x95, 0x8A, 0x00, 0x60, 0x97, 0xC9, 0xA0, 0x90))
+        ole32 = ctypes.windll.ole32
+        ole32.CoInitialize(None)
+        ptr = ctypes.c_void_p()
+        hr = ole32.CoCreateInstance(ctypes.byref(clsid), None, 1, ctypes.byref(iid), ctypes.byref(ptr))
+        if hr == 0 and ptr.value:
+            vtbl = ctypes.cast(
+                ctypes.cast(ptr, ctypes.POINTER(ctypes.c_void_p))[0],
+                ctypes.POINTER(ctypes.c_void_p),
+            )
+            hr_init = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p)(vtbl[3])
+            delete_tab = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p)(vtbl[5])
+            release = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(vtbl[2])
+            hr_init(ptr)
+            delete_tab(ptr, ctypes.c_void_p(int(hwnd)))
+            release(ptr)
+    except Exception:
+        pass
+
+
 class MiniIdentifyWindow(QWidget):
     """Compact, non-resizable, always-on-top mini window with Listen, Identify Last, AI Rescue, and live waveforms."""
 
@@ -2320,6 +2352,9 @@ class MiniIdentifyWindow(QWidget):
             | Qt.WindowType.WindowSystemMenuHint
             | Qt.WindowType.WindowCloseButtonHint,
         )
+        self._taskbar_owner = QWidget(None, Qt.WindowType.Tool)
+        self._taskbar_owner.winId()
+
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(app_icon)
         self.setFixedSize(356, 356)
@@ -2397,6 +2432,24 @@ class MiniIdentifyWindow(QWidget):
         lay.addLayout(bot_row)
 
         self._update_pin_ui()
+        self.ensure_no_taskbar()
+
+    def ensure_no_taskbar(self):
+        """Attaches a hidden Tool owner and removes the taskbar tab while keeping the titlebar icon."""
+        try:
+            self._taskbar_owner.winId()
+            hwnd = int(self.winId())
+            wh = self.windowHandle()
+            owner_wh = self._taskbar_owner.windowHandle()
+            if wh is not None and owner_wh is not None:
+                wh.setTransientParent(owner_wh)
+            user32 = ctypes.windll.user32
+            ex_style = user32.GetWindowLongW(hwnd, -20)
+            if ex_style & 0x00040000:
+                user32.SetWindowLongW(hwnd, -20, ex_style & ~0x00040000)
+            _delete_taskbar_tab(hwnd)
+        except Exception:
+            pass
 
     def _toggle_pin(self):
         self.set_pinned(not self.is_pinned)
@@ -2446,9 +2499,11 @@ class MiniIdentifyWindow(QWidget):
         self._update_pin_ui()
 
     def showEvent(self, event):
+        self.ensure_no_taskbar()
         super().showEvent(event)
         set_windows_titlebar_theme(int(self.winId()), self._dark)
         set_window_always_on_top(int(self.winId()), self.is_pinned)
+        QTimer.singleShot(0, self.ensure_no_taskbar)
 
     def closeEvent(self, event):
         event.accept()

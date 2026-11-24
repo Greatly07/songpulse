@@ -44,7 +44,7 @@ Name: "ai_models\inst_hq3"; Description: "UVR Inst HQ 3 Speech Stripper (~66 MB)
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional icons:"
-Name: "startup"; Description: "Run SongPulse automatically at Windows startup (hidden in system tray)"; GroupDescription: "Startup:"
+Name: "startup"; Description: "Run SongPulse automatically at Windows startup"; GroupDescription: "Startup:"
 
 [Files]
 Source: "dist\SongPulse_Core\*"; DestDir: "{app}"; Components: core; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -55,7 +55,7 @@ Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Registry]
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "{#MyAppName}"; ValueData: """{app}\{#MyAppExeName}"" --tray"; Flags: uninsdeletevalue; Tasks: startup
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "{#MyAppName}"; ValueData: """{app}\{#MyAppExeName}"""; Flags: uninsdeletevalue; Tasks: startup
 Root: HKCU; Subkey: "Software\Classes\songpulse"; ValueType: string; ValueName: ""; ValueData: "URL:SongPulse Protocol"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Classes\songpulse"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
 Root: HKCU; Subkey: "Software\Classes\songpulse\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""

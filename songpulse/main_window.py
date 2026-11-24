@@ -96,6 +96,7 @@ from .detail_view import (
 from .dialogs import (
     CustomThemeDialog,
     DownloadProgressDialog,
+    GithubPresetsDialog,
     StorageCleanupDialog,
     prompt_install_or_locate_ytdlp,
 )
@@ -196,6 +197,7 @@ class SongPulseWindow(QMainWindow):
         self.settings = load_settings()
         self._saved_settings_snapshot = copy.deepcopy(self.settings)
         self._saved_startup_snapshot = is_startup_enabled()
+        self._saved_outputs_snapshot = ([], [])
 
         self._audio_reconfig_timer = QTimer(self)
         self._audio_reconfig_timer.setSingleShot(True)
@@ -515,13 +517,37 @@ class SongPulseWindow(QMainWindow):
         elif not self.sidebar_user_collapsed and self.sidebar_collapsed:
             self._apply_sidebar_state(False, animate=True)
         self._sync_lib_header_responsive()
+        self._reposition_mini_mode_btn()
+
+    def eventFilter(self, obj, event):
+        if obj in (getattr(self, "id_page", None), getattr(getattr(self, "id_scroll", None), "viewport", lambda: None)()):
+            if event.type() in (QEvent.Type.Resize, QEvent.Type.Show):
+                QTimer.singleShot(0, self._reposition_mini_mode_btn)
+        return super().eventFilter(obj, event)
+
+    def _reposition_mini_mode_btn(self):
+        if not hasattr(self, "mini_mode_btn") or not hasattr(self, "id_scroll"):
+            return
+        self.mini_mode_btn.adjustSize()
+        vp_w = self.id_scroll.viewport().width()
+        if vp_w <= 0 and hasattr(self, "id_page"):
+            vp_w = self.id_page.width()
+        if vp_w <= 0:
+            return
+        content_right = min(vp_w - 22, (vp_w + 1280) // 2)
+        x = max(8, content_right - self.mini_mode_btn.width())
+        y = 18
+        self.mini_mode_btn.move(x, y)
+        self.mini_mode_btn.raise_()
 
     # --- IDENTIFY PAGE ---
     def _build_identify_page(self):
         page = QWidget()
         page.setObjectName("Page")
+        self.id_page = page
         page_lay = QVBoxLayout(page)
         page_lay.setContentsMargins(0, 0, 0, 0)
+        page_lay.setSpacing(0)
 
         scroll_inner = QWidget()
         outer = QHBoxLayout(scroll_inner)
@@ -536,7 +562,7 @@ class SongPulseWindow(QMainWindow):
         layout.setSpacing(10)
 
         header_top = QHBoxLayout()
-        header_top.setContentsMargins(0, 0, 0, 0)
+        header_top.setContentsMargins(0, 0, 128, 0)
         header_top.setSpacing(10)
 
         title_col = QVBoxLayout()
@@ -550,15 +576,7 @@ class SongPulseWindow(QMainWindow):
         title_col.addWidget(h1)
         title_col.addWidget(self.sub_status_lbl)
 
-        self.mini_mode_btn = QPushButton(" Mini Window")
-        self.mini_mode_btn.setObjectName("PlatformBtn")
-        self.mini_mode_btn.setIconSize(QSize(14, 14))
-        self.mini_mode_btn.setToolTip("Hide main window to tray and open compact always-on-top Mini Window")
-        self.mini_mode_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.mini_mode_btn.clicked.connect(self._enter_mini_mode)
-
         header_top.addLayout(title_col, 1)
-        header_top.addWidget(self.mini_mode_btn, alignment=Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
         layout.addLayout(header_top)
 
         self.no_output_banner = QFrame()
@@ -747,7 +765,21 @@ class SongPulseWindow(QMainWindow):
         outer.addWidget(center_col, 1)
         outer.addStretch(0)
 
-        page_lay.addWidget(_make_clean_scroll(scroll_inner, horizontal_off=True))
+        self.id_scroll = _make_clean_scroll(scroll_inner, horizontal_off=True)
+        page_lay.addWidget(self.id_scroll, 1)
+
+        self.mini_mode_btn = QPushButton(" Mini Window", page)
+        self.mini_mode_btn.setObjectName("PlatformBtn")
+        self.mini_mode_btn.setIconSize(QSize(14, 14))
+        self.mini_mode_btn.setToolTip("Hide main window to tray and open compact always-on-top Mini Window")
+        self.mini_mode_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.mini_mode_btn.clicked.connect(self._enter_mini_mode)
+        self.mini_mode_btn.raise_()
+
+        self.id_page.installEventFilter(self)
+        self.id_scroll.viewport().installEventFilter(self)
+        self.id_scroll.verticalScrollBar().rangeChanged.connect(lambda *_: self._reposition_mini_mode_btn())
+        QTimer.singleShot(0, self._reposition_mini_mode_btn)
 
         self._refresh_identify_header()
         if self.history:
@@ -1017,11 +1049,7 @@ class SongPulseWindow(QMainWindow):
         top = QHBoxLayout()
         h1 = QLabel("Settings")
         h1.setStyleSheet("font-size: 20px; font-weight: 700;")
-        self.unsaved_lbl = QLabel("")
-        self.unsaved_lbl.setStyleSheet("color: #D97706; font-size: 11px; font-weight: 600;")
         top.addWidget(h1)
-        top.addStretch()
-        top.addWidget(self.unsaved_lbl)
         layout.addLayout(top)
 
         # 1. Look, Theme & Waveform
@@ -1050,15 +1078,26 @@ class SongPulseWindow(QMainWindow):
         self.edit_theme_btn.setObjectName("PlatformBtn")
         self.edit_theme_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.edit_theme_btn.clicked.connect(self._open_edit_theme_dialog)
+        self.sync_presets_btn = QPushButton("Get Presets")
+        self.sync_presets_btn.setObjectName("PlatformBtn")
+        self.sync_presets_btn.setToolTip("Browse and install available custom theme presets from GitHub")
+        self.sync_presets_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.sync_presets_btn.clicked.connect(self._open_github_presets_dialog)
         themes_dir_btn = QPushButton("Themes Folder")
         themes_dir_btn.setObjectName("PlatformBtn")
         themes_dir_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         themes_dir_btn.clicked.connect(lambda: os.startfile(THEMES_DIR))
         theme_row.addWidget(self.theme_combo)
-        theme_row.addWidget(create_theme_btn)
-        theme_row.addWidget(self.edit_theme_btn)
-        theme_row.addWidget(themes_dir_btn)
         app_lay.addLayout(theme_row)
+
+        theme_btns_row = QHBoxLayout()
+        theme_btns_row.setSpacing(6)
+        theme_btns_row.addStretch()
+        theme_btns_row.addWidget(create_theme_btn)
+        theme_btns_row.addWidget(self.edit_theme_btn)
+        theme_btns_row.addWidget(self.sync_presets_btn)
+        theme_btns_row.addWidget(themes_dir_btn)
+        app_lay.addLayout(theme_btns_row)
 
         icon_row = QHBoxLayout()
         icon_row.setSpacing(8)
@@ -1190,7 +1229,7 @@ class SongPulseWindow(QMainWindow):
         sec2.setStyleSheet("font-size: 14px; font-weight: 600;")
         sys_lay.addWidget(sec2)
 
-        self.startup_chk = QCheckBox("Start automatically with Windows (hidden in tray)")
+        self.startup_chk = QCheckBox("Start automatically with Windows")
         self.startup_chk.stateChanged.connect(self._mark_unsaved)
         sys_lay.addWidget(self.startup_chk)
 
@@ -1586,12 +1625,16 @@ class SongPulseWindow(QMainWindow):
         footer_inner.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         footer = QHBoxLayout(footer_inner)
         footer.setContentsMargins(10, 0, 10, 0)
+        footer.setSpacing(10)
 
         self.discard_changes_btn = QPushButton("Discard Changes")
         self.discard_changes_btn.setObjectName("DangerBtn")
         self.discard_changes_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.discard_changes_btn.clicked.connect(self._discard_unsaved_settings)
         self.discard_changes_btn.hide()
+
+        self.unsaved_lbl = QLabel("")
+        self.unsaved_lbl.setStyleSheet("color: #D97706; font-size: 11px; font-weight: 600;")
 
         save_btn = QPushButton("Save Settings")
         save_btn.setObjectName("PrimaryBtn")
@@ -1600,6 +1643,7 @@ class SongPulseWindow(QMainWindow):
 
         footer.addWidget(self.discard_changes_btn)
         footer.addStretch()
+        footer.addWidget(self.unsaved_lbl)
         footer.addWidget(save_btn)
 
         footer_outer.addStretch(0)
@@ -1683,10 +1727,17 @@ class SongPulseWindow(QMainWindow):
     def _sync_theme_waveform_checkboxes(self, theme_key: str):
         if self.settings.get("waveform_style", "auto") != "auto":
             return
-        cfg = load_theme_config(theme_key, is_windows_dark_mode())
-        wf = cfg.get("waveform", {})
-        mirror = bool(wf.get("mirror", False))
-        idle_dots = bool(wf.get("idle_dots", False))
+        if (
+            theme_key == self._saved_settings_snapshot.get("theme", "auto")
+            and self._saved_settings_snapshot.get("waveform_style", "auto") == "auto"
+        ):
+            mirror = bool(self._saved_settings_snapshot.get("waveform_mirror", False))
+            idle_dots = bool(self._saved_settings_snapshot.get("waveform_idle_dots", False))
+        else:
+            cfg = load_theme_config(theme_key, is_windows_dark_mode())
+            wf = cfg.get("waveform", {})
+            mirror = bool(wf.get("mirror", False))
+            idle_dots = bool(wf.get("idle_dots", False))
         self.settings["waveform_mirror"] = mirror
         self.settings["waveform_idle_dots"] = idle_dots
         if hasattr(self, "wf_mirror_chk"):
@@ -1730,16 +1781,32 @@ class SongPulseWindow(QMainWindow):
         self.apply_theme(force=True)
         self._refresh_storage_summary()
 
-        if (
-            self.settings == self._saved_settings_snapshot
-            and self.startup_chk.isChecked() == self._saved_startup_snapshot
-        ):
+        if not self._has_unsaved_settings_changes():
             self.has_unsaved_settings = False
             self.discard_changes_btn.hide()
             self.unsaved_lbl.setText("Theme saved & applied!")
             QTimer.singleShot(
                 2000,
                 lambda: self.unsaved_lbl.setText("") if not self.has_unsaved_settings else None,
+            )
+
+    def _open_github_presets_dialog(self):
+        dlg = GithubPresetsDialog(parent=self)
+        if dlg.exec() and dlg.installed_names:
+            if hasattr(self, "theme_combo"):
+                cur_key = str(self.theme_combo.currentData() or self.settings.get("theme", "auto"))
+                self._suppress_unsaved = True
+                try:
+                    self._refresh_theme_dropdown(cur_key)
+                finally:
+                    self._suppress_unsaved = False
+            self._refresh_storage_summary()
+            names_txt = ", ".join(dlg.installed_names)
+            QMessageBox.information(
+                self,
+                "Presets Installed",
+                f"Installed custom theme preset(s): {names_txt}\n\n"
+                "Select them from the Theme dropdown in Settings.",
             )
 
     def _open_create_theme_dialog(self):
@@ -1885,6 +1952,10 @@ class SongPulseWindow(QMainWindow):
                 connected_devs,
                 monitor_all=bool(self.settings.get("monitor_all_devices", True)),
             )
+            self._saved_outputs_snapshot = (
+                self.audio_outputs_list.get_remembered(),
+                self.audio_outputs_list.get_selected(),
+            )
             self._update_audio_outputs_collapse_header()
             self.dev_status_lbl.setText("")
             self.has_unsaved_settings = False
@@ -1902,13 +1973,61 @@ class SongPulseWindow(QMainWindow):
         self._update_gpu_indicator()
         self._refresh_gpu_info_async()
 
+    def _has_unsaved_settings_changes(self) -> bool:
+        snap = self._saved_settings_snapshot
+        wf_styles = ["auto", "radial", "horizontal", "pulse_line", "bar", "dots"]
+        cur_wf = wf_styles[max(0, self.wf_style_combo.currentIndex())]
+        cur_hk = self.hk_input.text().strip().lower()
+        saved_hk = str(snap.get("hotkey", "ctrl+alt+s")).strip().lower()
+        cur_hk_mode = "live" if self.hk_mode_combo.currentIndex() == 1 else "buffer"
+        cur_outputs = (
+            self.audio_outputs_list.get_remembered(),
+            self.audio_outputs_list.get_selected(),
+        )
+        checks = [
+            (self.theme_combo.currentData() or "auto") != snap.get("theme", "auto"),
+            (self.icon_color_combo.currentData() or "theme") != snap.get("icon_color", "theme"),
+            (self.text_size_combo.currentData() or "small") != snap.get("text_size", "small"),
+            cur_wf != snap.get("waveform_style", "auto"),
+            self.wf_mirror_chk.isChecked() != bool(snap.get("waveform_mirror", False)),
+            self.wf_idle_dots_chk.isChecked() != bool(snap.get("waveform_idle_dots", False)),
+            self.wf_maxw_spin.value() != int(snap.get("waveform_max_width", 620)),
+            round(float(self.wf_step_spin.value()), 1) != round(float(snap.get("waveform_step", 0.0) or 0.0), 1),
+            self.save_win_size_chk.isChecked() != bool(snap.get("save_window_size", True)),
+            self.startup_chk.isChecked() != bool(self._saved_startup_snapshot),
+            self.start_tray_chk.isChecked() != bool(snap.get("start_minimized_to_tray", False)),
+            self.min_tray_chk.isChecked() != bool(snap.get("minimize_to_tray", True)),
+            self.notif_chk.isChecked() != bool(snap.get("show_notifications", True)),
+            self.always_hud_chk.isChecked() != bool(snap.get("always_show_status_hud", True)),
+            self.force_overlay_chk.isChecked() != bool(snap.get("force_overlay_notification", True)),
+            self.ping_chk.isChecked() != bool(snap.get("play_ping_sound", True)),
+            self.autocopy_chk.isChecked() != bool(snap.get("auto_copy", False)),
+            (self.info_site_combo.currentData() or "auto") != snap.get("preferred_info_site", "auto"),
+            bool(cur_hk) and cur_hk != saved_hk,
+            cur_hk_mode != snap.get("hotkey_mode", "live"),
+            self.ytdlp_path_input.text().strip() != str(snap.get("ytdlp_app_path", "")).strip(),
+            self.ytdlp_quick_mp3_chk.isChecked() != bool(snap.get("ytdlp_quick_download_mp3", True)),
+            cur_outputs != self._saved_outputs_snapshot,
+            self.enable_buf_chk.isChecked() != bool(snap.get("enable_audio_buffer", True)),
+            self.buf_spin.value() != int(snap.get("buffer_seconds", 12)),
+            self.live_spin.value() != int(snap.get("live_max_seconds", 20)),
+            self.gpu_auto_cpu_chk.isChecked() != bool(snap.get("gpu_auto_cpu", True)),
+            self.gpu_thresh_spin.value() != int(snap.get("gpu_threshold", 65)),
+        ]
+        return any(checks)
+
     def _mark_unsaved(self, *_args):
         if getattr(self, "_suppress_unsaved", False):
             return
-        self.has_unsaved_settings = True
-        self.unsaved_lbl.setText("Previewing unsaved changes")
-        self.discard_changes_btn.show()
         self._apply_live_settings()
+        dirty = self._has_unsaved_settings_changes()
+        self.has_unsaved_settings = dirty
+        if dirty:
+            self.unsaved_lbl.setText("Previewing unsaved changes")
+            self.discard_changes_btn.show()
+        else:
+            self.unsaved_lbl.setText("")
+            self.discard_changes_btn.hide()
 
     def _apply_live_settings(self):
         old_devices = list(self.settings.get("target_devices", []))
@@ -1951,8 +2070,16 @@ class SongPulseWindow(QMainWindow):
         remembered_devs = self.audio_outputs_list.get_remembered()
         checked_devs = self.audio_outputs_list.get_selected()
         self.settings["remembered_devices"] = remembered_devs
-        self.settings["monitor_all_devices"] = False
-        self.settings["target_devices"] = checked_devs
+        if (remembered_devs, checked_devs) == getattr(self, "_saved_outputs_snapshot", None) and bool(
+            self._saved_settings_snapshot.get("monitor_all_devices", False)
+        ):
+            self.settings["monitor_all_devices"] = True
+            self.settings["target_devices"] = list(
+                self._saved_settings_snapshot.get("target_devices", [])
+            )
+        else:
+            self.settings["monitor_all_devices"] = False
+            self.settings["target_devices"] = checked_devs
 
         self.apply_theme(force=False)
         self._update_gpu_indicator()
@@ -2017,6 +2144,10 @@ class SongPulseWindow(QMainWindow):
 
         self._saved_settings_snapshot = copy.deepcopy(self.settings)
         self._saved_startup_snapshot = self.startup_chk.isChecked()
+        self._saved_outputs_snapshot = (
+            self.audio_outputs_list.get_remembered(),
+            self.audio_outputs_list.get_selected(),
+        )
         self.has_unsaved_settings = False
         self.discard_changes_btn.hide()
         self._refresh_identify_header()
@@ -2064,7 +2195,7 @@ class SongPulseWindow(QMainWindow):
         if reply != QMessageBox.StandardButton.Yes:
             return
         self._audio_reconfig_timer.stop()
-        self.settings = DEFAULT_SETTINGS.copy()
+        self.settings = copy.deepcopy(DEFAULT_SETTINGS)
         save_settings(self.settings)
         self._saved_settings_snapshot = copy.deepcopy(self.settings)
         self._register_hotkey(self.settings["hotkey"])
@@ -2685,6 +2816,8 @@ class SongPulseWindow(QMainWindow):
             self.show_and_focus()
 
     def show_and_focus(self):
+        if hasattr(self, "mini_window") and self.mini_window.isVisible():
+            self.mini_window.hide()
         self.setWindowState(
             (self.windowState() & ~Qt.WindowState.WindowMinimized)
             | Qt.WindowState.WindowActive
@@ -2737,6 +2870,8 @@ class SongPulseWindow(QMainWindow):
         if event.type() == QEvent.Type.WindowStateChange:
             if self.isMinimized() and self.settings.get("minimize_to_tray", True):
                 QTimer.singleShot(0, self.hide)
+                if hasattr(self, "mini_window") and self.mini_window.isVisible():
+                    QTimer.singleShot(0, self.mini_window.ensure_no_taskbar)
                 if not self.tray_hint_shown:
                     self.tray_hint_shown = True
                     self.hud.show_message(
@@ -2763,6 +2898,8 @@ class SongPulseWindow(QMainWindow):
         self.song_popup.hide()
         if hasattr(self, "mini_window"):
             self.mini_window.hide()
+            if hasattr(self.mini_window, "_taskbar_owner"):
+                self.mini_window._taskbar_owner.close()
         self.tray.hide()
         QApplication.quit()
         if force:
@@ -2863,6 +3000,7 @@ class SongPulseWindow(QMainWindow):
             if hasattr(self, "mini_window"):
                 apply_font_scale_to_widget_tree(self.mini_window, font_scale)
             self._refresh_theme_icons()
+            QTimer.singleShot(0, self._reposition_mini_mode_btn)
             if self.pages.currentIndex() == 1:
                 self.refresh_library()
 
@@ -2872,6 +3010,8 @@ class SongPulseWindow(QMainWindow):
             self.app_icon = themed_icon
             app.setWindowIcon(themed_icon)
             self.setWindowIcon(themed_icon)
+            if hasattr(self, "mini_window"):
+                self.mini_window.setWindowIcon(themed_icon)
             if hasattr(self, "tray"):
                 self.tray.setIcon(themed_icon)
             if hasattr(self, "brand_icon"):
@@ -3867,11 +4007,14 @@ class SongPulseWindow(QMainWindow):
         if not hasattr(self, "mini_window"):
             return
         self.hide()
+        self.mini_window.ensure_no_taskbar()
+        self.mini_window.setWindowIcon(self.app_icon)
         self.mini_window.show()
         self.mini_window.raise_()
         self.mini_window.activateWindow()
         set_windows_titlebar_theme(int(self.mini_window.winId()), bool(self.last_dark_state))
         set_window_always_on_top(int(self.mini_window.winId()), self.mini_window.is_pinned)
+        QTimer.singleShot(0, self.mini_window.ensure_no_taskbar)
 
     def _exit_mini_mode(self):
         if hasattr(self, "mini_window"):

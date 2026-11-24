@@ -4,20 +4,23 @@ import shutil
 import webbrowser
 
 from PyQt6.QtCore import QEvent, QObject, QRectF, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QCursor, QPainter, QPainterPath, QPen
+from PyQt6.QtGui import QColor, QCursor, QFontMetrics, QPainter, QPainterPath, QPalette, QPen
 from PyQt6.QtWidgets import (
     QCheckBox,
     QColorDialog,
     QDialog,
     QFileDialog,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLayout,
     QLineEdit,
     QMessageBox,
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSpinBox,
     QToolTip,
     QVBoxLayout,
     QWidget,
@@ -31,6 +34,7 @@ from .config import (
     get_saved_theme_colors,
     get_storage_breakdown,
     record_saved_theme_colors,
+    set_windows_titlebar_theme,
 )
 from .themes_manager import (
     TEMPLATE_FILENAME,
@@ -43,6 +47,7 @@ from .themes_manager import (
 )
 from .waveforms import resolve_template_waveform
 from .widgets import ElidedLabel, NoWheelComboBox, NoWheelSpinBox, _paint_surface
+from .workers import GithubPresetsCatalogWorker, GithubPresetsInstallWorker
 from .workers import YtDlpInstallerWorker
 
 
@@ -568,7 +573,7 @@ class _ColorSwatchButton(QPushButton):
         super().__init__(parent)
         self._color = QColor(initial_hex or "#38BDF8")
         self.setProperty("_dynamic_qss", True)
-        self.setFixedSize(76, 26)
+        self.setFixedSize(82, 28)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.clicked.connect(self._pick)
         self._sync_style()
@@ -593,13 +598,40 @@ class _ColorSwatchButton(QPushButton):
             QColorDialog.setCustomColor(idx, c)
 
         for lbl in dlg.findChildren(QLabel):
-            if "custom" in lbl.text().lower():
+            txt = lbl.text().strip()
+            if not txt:
+                lbl.setFixedHeight(8)
+                lbl.setStyleSheet("padding: 0px;")
+            elif "custom" in txt.lower():
                 lbl.setText("&Saved colors")
-                break
         for btn in dlg.findChildren(QPushButton):
             if "add" in btn.text().lower() and "custom" in btn.text().lower():
                 btn.setVisible(False)
                 break
+
+        if dlg.layout() is not None:
+            dlg.layout().setContentsMargins(14, 14, 14, 14)
+            if dlg.layout().spacing() >= 0:
+                dlg.layout().setSpacing(max(dlg.layout().spacing(), 8))
+        for grid in dlg.findChildren(QGridLayout):
+            grid.setHorizontalSpacing(6)
+            grid.setVerticalSpacing(4)
+            grid.setContentsMargins(4, 2, 4, 2)
+
+        dlg.ensurePolished()
+        for sb in dlg.findChildren(QSpinBox):
+            sb_fm = QFontMetrics(sb.font())
+            sb.setFixedWidth(sb_fm.horizontalAdvance("359") + 44)
+        for le in dlg.findChildren(QLineEdit):
+            if not isinstance(le.parentWidget(), QSpinBox):
+                fm = QFontMetrics(le.font())
+                le.setFixedWidth(fm.horizontalAdvance("#888888") + 28)
+
+        set_windows_titlebar_theme(
+            int(dlg.winId()),
+            dlg.palette().color(QPalette.ColorRole.Window).lightness() < 128,
+        )
+        dlg.adjustSize()
 
         if dlg.exec():
             picked = dlg.currentColor()
@@ -615,7 +647,8 @@ class _ColorSwatchButton(QPushButton):
         self.setText(self._color.name().upper())
         qss = (
             f"QPushButton {{ background-color: {self._color.name()}; color: {fg}; "
-            f"border: 1px solid rgba(255,255,255,0.28); border-radius: 6px; font-size: 10px; font-weight: 700; }}"
+            f"border: 1px solid rgba(255,255,255,0.28); border-radius: 6px; padding: 2px 6px; "
+            f"font-size: 11px; font-weight: 700; }}"
         )
         self.setProperty("_base_qss", qss)
         self.setStyleSheet(qss)
@@ -1310,4 +1343,212 @@ class CustomThemeDialog(QDialog):
         self.created_theme_key = save_custom_theme(
             name, data, previous_theme_key=self._edit_theme_key
         )
+        self.accept()
+
+
+class GithubPresetsDialog(QDialog):
+    """Lets the user browse and selectively install undownloaded custom theme presets from GitHub."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Custom Theme Presets")
+        self.setModal(True)
+        self.setMinimumSize(440, 340)
+        self.installed_names: list[str] = []
+        self._presets: list[dict] = []
+        self._checkboxes: list[tuple[QCheckBox, dict]] = []
+        self._catalog_worker = None
+        self._install_worker = None
+
+        set_windows_titlebar_theme(
+            int(self.winId()),
+            self.palette().color(QPalette.ColorRole.Window).lightness() < 128,
+        )
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(18, 16, 18, 16)
+        root.setSpacing(10)
+
+        hdr = QLabel("Custom Theme Presets")
+        hdr.setStyleSheet("font-size: 17px; font-weight: 700;")
+        sub = QLabel("Choose one or more available themes from GitHub to install.")
+        sub.setObjectName("Muted")
+        sub.setWordWrap(True)
+        sub.setStyleSheet("font-size: 11px;")
+        root.addWidget(hdr)
+        root.addWidget(sub)
+
+        self.status_lbl = QLabel("Checking GitHub for available custom theme presets...")
+        self.status_lbl.setObjectName("Muted")
+        self.status_lbl.setWordWrap(True)
+        self.status_lbl.setStyleSheet("font-size: 12px;")
+        root.addWidget(self.status_lbl)
+
+        self.pbar = QProgressBar()
+        self.pbar.setRange(0, 0)
+        self.pbar.setTextVisible(True)
+        root.addWidget(self.pbar)
+
+        self.select_all_chk = QCheckBox("Select All")
+        self.select_all_chk.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.select_all_chk.stateChanged.connect(self._on_select_all_toggled)
+        self.select_all_chk.hide()
+        root.addWidget(self.select_all_chk)
+
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.list_body = QWidget()
+        self.list_lay = QVBoxLayout(self.list_body)
+        self.list_lay.setContentsMargins(0, 2, 4, 2)
+        self.list_lay.setSpacing(6)
+        self.list_lay.addStretch(1)
+        self.scroll.setWidget(self.list_body)
+        self.scroll.hide()
+        root.addWidget(self.scroll, 1)
+
+        footer = QHBoxLayout()
+        footer.setSpacing(8)
+        footer.addStretch()
+
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setObjectName("DangerBtn")
+        self.cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.cancel_btn.clicked.connect(self.reject)
+
+        self.install_btn = QPushButton("Install Selected")
+        self.install_btn.setObjectName("PrimaryBtn")
+        self.install_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.install_btn.setEnabled(False)
+        self.install_btn.clicked.connect(self._on_install_clicked)
+
+        footer.addWidget(self.cancel_btn)
+        footer.addWidget(self.install_btn)
+        root.addLayout(footer)
+
+        self._fetch_catalog()
+
+    def _fetch_catalog(self):
+        self._catalog_worker = GithubPresetsCatalogWorker(parent=self)
+        self._catalog_worker.catalog_ready.connect(self._on_catalog_ready)
+        self._catalog_worker.error.connect(self._on_catalog_error)
+        self._catalog_worker.start()
+
+    def _on_catalog_ready(self, presets: list):
+        self.pbar.hide()
+        self._presets = list(presets or [])
+        self._checkboxes.clear()
+
+        while self.list_lay.count() > 1:
+            it = self.list_lay.takeAt(0)
+            if it and it.widget():
+                it.widget().deleteLater()
+
+        if not self._presets:
+            self.status_lbl.setText(
+                "All available custom theme presets from GitHub are already installed."
+            )
+            self.select_all_chk.hide()
+            self.scroll.hide()
+            self.install_btn.hide()
+            self.cancel_btn.setText("Close")
+            return
+
+        self.status_lbl.setText(
+            f"Found {len(self._presets)} undownloaded preset(s) available:"
+        )
+        self.select_all_chk.setVisible(len(self._presets) >= 2)
+        self.scroll.show()
+
+        for idx, preset in enumerate(self._presets):
+            card = QFrame()
+            card.setObjectName("SongCard")
+            row = QHBoxLayout(card)
+            row.setContentsMargins(10, 8, 12, 8)
+            row.setSpacing(10)
+
+            chk = QCheckBox(preset.get("name") or preset.get("slug") or "Preset")
+            chk.setCursor(Qt.CursorShape.PointingHandCursor)
+            chk.setStyleSheet("font-size: 13px; font-weight: 600;")
+            chk.stateChanged.connect(self._sync_selection_state)
+            row.addWidget(chk, 1)
+
+            for col_hex in (preset.get("accent"), preset.get("accent_secondary")):
+                if col_hex:
+                    dot = QLabel()
+                    dot.setFixedSize(12, 12)
+                    dot.setStyleSheet(
+                        f"background-color: {col_hex}; border-radius: 6px; "
+                        f"border: 1px solid rgba(255,255,255,0.28);"
+                    )
+                    row.addWidget(dot)
+
+            base_lbl = QLabel("Dark" if preset.get("base_dark", True) else "Light")
+            base_lbl.setObjectName("MetaChip")
+            row.addWidget(base_lbl)
+
+            self.list_lay.insertWidget(idx, card)
+            self._checkboxes.append((chk, preset))
+
+        self._sync_selection_state()
+
+    def _on_catalog_error(self, err: str):
+        self.pbar.hide()
+        self.status_lbl.setText(f"Could not fetch presets from GitHub:\n{err}")
+        self.install_btn.hide()
+        self.cancel_btn.setText("Close")
+
+    def _on_select_all_toggled(self, state: int):
+        checked = state == Qt.CheckState.Checked.value
+        for chk, _preset in self._checkboxes:
+            chk.blockSignals(True)
+            chk.setChecked(checked)
+            chk.blockSignals(False)
+        self._sync_selection_state()
+
+    def _sync_selection_state(self):
+        selected_count = sum(1 for chk, _p in self._checkboxes if chk.isChecked())
+        total = len(self._checkboxes)
+        if total >= 2:
+            self.select_all_chk.blockSignals(True)
+            self.select_all_chk.setChecked(selected_count == total and total > 0)
+            self.select_all_chk.blockSignals(False)
+        self.install_btn.setEnabled(selected_count > 0)
+        self.install_btn.setText(
+            f"Install Selected ({selected_count})" if selected_count > 0 else "Install Selected"
+        )
+
+    def _on_install_clicked(self):
+        selected = [preset for chk, preset in self._checkboxes if chk.isChecked()]
+        if not selected:
+            return
+        self.install_btn.setEnabled(False)
+        self.cancel_btn.setEnabled(False)
+        self.select_all_chk.setEnabled(False)
+        for chk, _p in self._checkboxes:
+            chk.setEnabled(False)
+
+        self.pbar.setRange(0, 100)
+        self.pbar.setValue(0)
+        self.pbar.show()
+        self.status_lbl.setText("Starting download...")
+
+        self._install_worker = GithubPresetsInstallWorker(selected, parent=self)
+        self._install_worker.progress.connect(self._on_install_progress)
+        self._install_worker.finished_install.connect(self._on_install_finished)
+        self._install_worker.start()
+
+    def _on_install_progress(self, pct: int, msg: str):
+        self.status_lbl.setText(msg)
+        self.pbar.setValue(max(0, min(100, pct)))
+
+    def _on_install_finished(self, installed_names: list, err: str):
+        self.installed_names = list(installed_names or [])
+        if err:
+            self.pbar.hide()
+            self.cancel_btn.setEnabled(True)
+            self.cancel_btn.setText("Close")
+            self.status_lbl.setText(f"Download failed:\n{err}")
+            return
         self.accept()

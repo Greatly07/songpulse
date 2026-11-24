@@ -281,6 +281,7 @@ def list_custom_themes() -> list[tuple[str, str]]:
                 entry.is_file()
                 and entry.name.lower().endswith(".json")
                 and entry.name.lower() != TEMPLATE_FILENAME
+                and not entry.name.startswith((".", "_"))
             ):
                 tid = os.path.splitext(entry.name)[0]
                 disp = tid.replace("_", " ").replace("-", " ").title()
