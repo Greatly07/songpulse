@@ -422,6 +422,53 @@ def create_platform_icon(kind: str, size=14):
     return QIcon(pix)
 
 
+_BLURRED_SRC_CACHE: dict[tuple[str, int, int, int], QPixmap] = {}
+
+
+def _pil_rgba_to_pixmap(im) -> QPixmap:
+    raw = im.tobytes("raw", "RGBA")
+    qimg = QImage(raw, im.width, im.height, im.width * 4, QImage.Format.Format_RGBA8888).copy()
+    return QPixmap.fromImage(qimg)
+
+
+def get_cached_blurred_source(image_path: str, blur_radius: int = 0, max_dim: int = 1280) -> QPixmap:
+    """Loads, optionally downscales, and blurs a theme image once per (path, mtime, blur_radius)."""
+    if not image_path or not os.path.isfile(image_path):
+        return QPixmap()
+    norm = os.path.normcase(os.path.abspath(image_path))
+    try:
+        mtime_ns = os.stat(image_path).st_mtime_ns
+    except OSError:
+        mtime_ns = 0
+    blur_i = max(0, int(blur_radius or 0))
+    key = (norm, mtime_ns, blur_i, int(max_dim))
+    cached = _BLURRED_SRC_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    try:
+        from PIL import Image, ImageFilter
+
+        with Image.open(image_path) as im:
+            im = im.convert("RGBA")
+            iw, ih = im.size
+            if max(iw, ih) > max_dim:
+                scale = max_dim / float(max(iw, ih))
+                nw = max(1, int(round(iw * scale)))
+                nh = max(1, int(round(ih * scale)))
+                im = im.resize((nw, nh), Image.Resampling.LANCZOS)
+            if blur_i > 0:
+                im = im.filter(ImageFilter.GaussianBlur(radius=float(blur_i)))
+            pix = _pil_rgba_to_pixmap(im)
+    except Exception:
+        pix = QPixmap(image_path)
+
+    if len(_BLURRED_SRC_CACHE) >= 12:
+        _BLURRED_SRC_CACHE.pop(next(iter(_BLURRED_SRC_CACHE)))
+    _BLURRED_SRC_CACHE[key] = pix
+    return pix
+
+
 def render_blurred_pixmap(
     image_path: str, width: int, height: int, blur_radius: int = 8, fit_mode: str = "cover"
 ) -> QPixmap:
@@ -455,11 +502,7 @@ def render_blurred_pixmap(
                 im = im.crop((left, top, left + width, top + height))
             if blur_radius and blur_radius > 0:
                 im = im.filter(ImageFilter.GaussianBlur(radius=float(blur_radius)))
-            buf = io.BytesIO()
-            im.save(buf, format="PNG")
-            pix = QPixmap()
-            pix.loadFromData(buf.getvalue(), "PNG")
-            return pix
+            return _pil_rgba_to_pixmap(im)
     except Exception:
         pix = QPixmap(image_path)
         if pix.isNull():
@@ -581,30 +624,7 @@ def extract_cover_gradient_colors(
             c1 = _avg_filtered(top_samples, default_c1)
             c2 = _avg_filtered(bot_samples, default_c2)
 
-    # Check if active theme provides a colored signature backdrop (e.g. Miku cyan-blue or Teto crimson gradient)
-    t_id = (theme_cfg or {}).get("id", "")
-    t_bg = (theme_cfg or {}).get("background", {})
-    t_cols = (theme_cfg or {}).get("colors", {})
-    use_theme_tint = t_id in ("miku", "teto") or t_id.startswith("custom:")
-
-    if use_theme_tint and t_bg.get("color1"):
-        qc1 = QColor(t_bg.get("color1", "#061926"))
-        qc2 = QColor(t_bg.get("color2", t_bg.get("color1", "#0C3E59")))
-        tb1 = (qc1.red(), qc1.green(), qc1.blue())
-        tb2 = (qc2.red(), qc2.green(), qc2.blue())
-        if dark:
-            # Blend album art gently onto the theme's signature gradient so it stays cohesive
-            g1 = _blend_rgb(c1, tb2, 0.72)
-            g2 = _blend_rgb(c2, tb1, 0.76)
-            base = tb1
-            if t_id in ("miku", "teto"):
-                qac = QColor(t_cols.get("accent", "#39C5BB"))
-                accent = _blend_rgb(accent, (qac.red(), qac.green(), qac.blue()), 0.55)
-        else:
-            g1 = _blend_rgb(c1, tb1, 0.72)
-            g2 = _blend_rgb(c2, tb2, 0.78)
-            base = tb2
-    elif dark:
+    if dark:
         base = (17, 18, 22)
         g1 = _blend_rgb(c1, base, 0.56)
         g2 = _blend_rgb(c2, base, 0.68)
@@ -688,6 +708,8 @@ def apply_font_scale_to_widget_tree(root, scale: float):
 
     widgets = [root] + root.findChildren(QWidget)
     for w in widgets:
+        if w.property("_dynamic_qss"):
+            continue
         base_qss = w.property("_base_qss")
         cur_qss = w.styleSheet() or ""
         if base_qss is None:
@@ -992,6 +1014,11 @@ QPushButton#PlatformBtn {{
 }}
 QPushButton#PlatformBtn:hover {{
     background-color: {c['btn_hover']};
+    border-color: {accent};
+}}
+QPushButton#PlatformBtn:checked {{
+    background-color: {accent};
+    color: {ac_text};
     border-color: {accent};
 }}
 QPushButton#PlatformBtn::menu-indicator {{

@@ -1,13 +1,13 @@
+import copy
 import os
 import shutil
 import webbrowser
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor
+from PyQt6.QtCore import QEvent, QObject, QRectF, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor, QCursor, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import (
     QCheckBox,
     QColorDialog,
-    QComboBox,
     QDialog,
     QFileDialog,
     QFrame,
@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
-    QSpinBox,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -28,10 +28,71 @@ from .config import (
     THEMES_DIR,
     YTDLP_GITHUB_REPO,
     format_bytes,
+    get_saved_theme_colors,
     get_storage_breakdown,
+    record_saved_theme_colors,
 )
-from .themes_manager import TEMPLATE_FILENAME, ensure_theme_template_and_assets, save_custom_theme
+from .themes_manager import (
+    TEMPLATE_FILENAME,
+    ensure_theme_template_and_assets,
+    find_theme_name_conflict,
+    import_theme_photo,
+    load_raw_custom_theme,
+    resolve_theme_image_path,
+    save_custom_theme,
+)
+from .waveforms import resolve_template_waveform
+from .widgets import ElidedLabel, NoWheelComboBox, NoWheelSpinBox, _paint_surface
 from .workers import YtDlpInstallerWorker
+
+
+class _DelayedTooltipFilter(QObject):
+    """Shows a widget's tooltip only after hovering for `delay_ms` (default 1000 ms)."""
+
+    def __init__(self, widget: QWidget, text: str, delay_ms: int = 1000):
+        super().__init__(widget)
+        self._widget = widget
+        self._text = text
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(delay_ms)
+        self._timer.timeout.connect(self._show_tip)
+        widget.installEventFilter(self)
+
+    def _show_tip(self):
+        if self._widget and self._widget.isVisible() and self._widget.underMouse():
+            QToolTip.showText(QCursor.pos(), self._text, self._widget)
+
+    def eventFilter(self, obj, event):
+        et = event.type()
+        if et == QEvent.Type.ToolTip:
+            return True
+        if et == QEvent.Type.Enter:
+            self._timer.start()
+        elif et in (
+            QEvent.Type.Leave,
+            QEvent.Type.MouseButtonPress,
+            QEvent.Type.Hide,
+            QEvent.Type.Wheel,
+            QEvent.Type.FocusOut,
+        ):
+            self._timer.stop()
+            QToolTip.hideText()
+        return False
+
+
+def set_delayed_tooltip(widget: QWidget, text: str, delay_ms: int = 1000):
+    if widget is None or not text:
+        return
+    widget._delayed_tip_filter = _DelayedTooltipFilter(widget, text, delay_ms=delay_ms)
+
+
+def _alpha_to_pct(alpha: int) -> int:
+    return max(0, min(100, int(round((max(0, min(240, int(alpha))) / 240.0) * 100))))
+
+
+def _pct_to_alpha(pct: int) -> int:
+    return max(0, min(240, int(round((max(0, min(100, int(pct))) / 100.0) * 240))))
 
 
 class DownloadProgressDialog(QDialog):
@@ -215,6 +276,7 @@ class StorageCleanupDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._list_host = QWidget()
         self._list_lay = QVBoxLayout(self._list_host)
         self._list_lay.setContentsMargins(2, 4, 8, 4)
@@ -323,6 +385,14 @@ class StorageCleanupDialog(QDialog):
             info["unused_cover_bytes"],
             lambda files=list(info["unused_cover_files"]): self._delete_covers(files),
             "unused_covers",
+            checked=True,
+        )
+        self._add_item_row(
+            f"Unused Theme Photos ({len(info['unused_theme_photo_files'])} files)",
+            "Saved custom theme pictures no longer referenced by any theme.",
+            info["unused_theme_photo_bytes"],
+            lambda files=list(info["unused_theme_photo_files"]): self._delete_files(files),
+            "unused_theme_photos",
             checked=True,
         )
         self._add_item_row(
@@ -492,9 +562,12 @@ class StorageCleanupDialog(QDialog):
 
 
 class _ColorSwatchButton(QPushButton):
+    color_changed = pyqtSignal(str)
+
     def __init__(self, initial_hex: str, parent=None):
         super().__init__(parent)
         self._color = QColor(initial_hex or "#38BDF8")
+        self.setProperty("_dynamic_qss", True)
         self.setFixedSize(76, 26)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.clicked.connect(self._pick)
@@ -503,41 +576,154 @@ class _ColorSwatchButton(QPushButton):
     def hex_value(self) -> str:
         return self._color.name()
 
-    def _pick(self):
-        picked = QColorDialog.getColor(self._color, self, "Choose Color")
-        if picked.isValid():
-            self._color = picked
+    def set_color(self, hex_str: str):
+        col = QColor(hex_str or "#38BDF8")
+        if col.isValid():
+            self._color = col
             self._sync_style()
+
+    def _pick(self):
+        dlg = QColorDialog(self._color, self)
+        dlg.setWindowTitle("Choose Color")
+        dlg.setOption(QColorDialog.ColorDialogOption.DontUseNativeDialog, True)
+
+        saved = get_saved_theme_colors()
+        for idx in range(QColorDialog.customCount()):
+            c = QColor(saved[idx]) if idx < len(saved) else QColor("#FFFFFF")
+            QColorDialog.setCustomColor(idx, c)
+
+        for lbl in dlg.findChildren(QLabel):
+            if "custom" in lbl.text().lower():
+                lbl.setText("&Saved colors")
+                break
+        for btn in dlg.findChildren(QPushButton):
+            if "add" in btn.text().lower() and "custom" in btn.text().lower():
+                btn.setVisible(False)
+                break
+
+        if dlg.exec():
+            picked = dlg.currentColor()
+            if picked.isValid():
+                self._color = picked
+                self._sync_style()
+                record_saved_theme_colors([self._color.name()])
+                self.color_changed.emit(self._color.name())
 
     def _sync_style(self):
         lum = 0.2126 * self._color.red() + 0.7152 * self._color.green() + 0.0722 * self._color.blue()
         fg = "#0F172A" if lum > 165 else "#FFFFFF"
         self.setText(self._color.name().upper())
-        self.setStyleSheet(
+        qss = (
             f"QPushButton {{ background-color: {self._color.name()}; color: {fg}; "
             f"border: 1px solid rgba(255,255,255,0.28); border-radius: 6px; font-size: 10px; font-weight: 700; }}"
         )
+        self.setProperty("_base_qss", qss)
+        self.setStyleSheet(qss)
+        self.update()
+
+
+class _PhotoPreviewWidget(QFrame):
+    """Clickable thumbnail that renders the chosen photo with blur & darken applied directly."""
+
+    clicked = pyqtSignal()
+
+    def __init__(self, w: int, h: int, is_sidebar: bool = False, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(w, h)
+        self._is_sidebar = bool(is_sidebar)
+        self._cfg: dict = {}
+        self._pix_cache: dict = {}
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def set_preview_config(self, cfg: dict):
+        new_cfg = dict(cfg or {})
+        old_sig = (self._cfg.get("image"), self._cfg.get("blur"), self._cfg.get("fit"))
+        new_sig = (new_cfg.get("image"), new_cfg.get("blur"), new_cfg.get("fit"))
+        self._cfg = new_cfg
+        if old_sig != new_sig:
+            self._pix_cache.clear()
+        self.update()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = self.rect()
+        clip = QPainterPath()
+        clip.addRoundedRect(QRectF(0.5, 0.5, rect.width() - 1.0, rect.height() - 1.0), 8.0, 8.0)
+        p.setClipPath(clip)
+
+        img_path = resolve_theme_image_path(self._cfg.get("image", ""))
+        if img_path:
+            preview_cfg = dict(self._cfg)
+            preview_cfg["type"] = "image"
+            preview_cfg["image"] = img_path
+            preview_cfg["darken_black"] = True
+            _paint_surface(
+                p,
+                rect,
+                preview_cfg,
+                self._pix_cache,
+                is_sidebar=self._is_sidebar,
+                exact_thumb=True,
+            )
+            p.setClipping(False)
+            p.setPen(QPen(QColor(255, 255, 255, 55), 1.0))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRoundedRect(QRectF(0.5, 0.5, rect.width() - 1.0, rect.height() - 1.0), 8.0, 8.0)
+        else:
+            p.fillRect(rect, QColor(255, 255, 255, 14))
+            p.setClipping(False)
+            pen = QPen(QColor(148, 163, 184, 110), 1.0, Qt.PenStyle.DashLine)
+            p.setPen(pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRoundedRect(QRectF(1.0, 1.0, rect.width() - 2.0, rect.height() - 2.0), 8.0, 8.0)
+            p.setPen(QColor(148, 163, 184, 190))
+            f = p.font()
+            f.setPointSize(8)
+            p.setFont(f)
+            p.drawText(rect, Qt.AlignmentFlag.AlignCenter, "No photo")
+        p.end()
 
 
 class CustomThemeDialog(QDialog):
-    """Visual custom theme creator that saves clean JSON theme files into DATA_DIR/themes."""
+    """Visual custom theme creator and editor with live preview, mini window, and photo persistence."""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, edit_theme_key: str = "", on_preview=None, on_stop_preview=None):
         super().__init__(parent)
         ensure_theme_template_and_assets()
-        self.setWindowTitle("Create Custom Theme")
+        self._edit_theme_key = (edit_theme_key or "").strip()
+        self._is_edit = bool(self._edit_theme_key)
+        self._on_preview = on_preview
+        self._on_stop_preview = on_stop_preview
+        self._preview_active = False
+        self._suppress_preview = True
+        self._raw_edit_data = load_raw_custom_theme(self._edit_theme_key) if self._is_edit else None
+
+        title = "Edit Custom Theme" if self._is_edit else "Create Custom Theme"
+        self.setWindowTitle(title)
         self.setModal(True)
-        self.setMinimumSize(500, 560)
+        self.setMinimumSize(560, 620)
         self.created_theme_key = ""
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(2000)
+        self._preview_timer.timeout.connect(self._apply_debounced_preview)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(18, 16, 18, 16)
         root.setSpacing(12)
 
-        hdr = QLabel("Create Custom Theme")
+        hdr = QLabel(title)
         hdr.setStyleSheet("font-size: 18px; font-weight: 700;")
         sub = QLabel(
-            "Pick solid colors, gradients, or photos for your background and sidebar, or edit the JSON template directly."
+            "Customize colors, blurred photos, mini window look, highlights, and live waveform."
         )
         sub.setObjectName("Muted")
         sub.setWordWrap(True)
@@ -548,6 +734,7 @@ class CustomThemeDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         body = QWidget()
         lay = QVBoxLayout(body)
         lay.setContentsMargins(2, 4, 8, 4)
@@ -555,121 +742,118 @@ class CustomThemeDialog(QDialog):
 
         # Name & Base
         r1 = QHBoxLayout()
+        r1.setSpacing(8)
         r1.addWidget(QLabel("Theme Name"))
-        self.name_in = QLineEdit("My Custom Theme")
+        self.name_in = QLineEdit()
+        self.name_in.setPlaceholderText("My Custom Theme")
         r1.addWidget(self.name_in, 1)
-        self.base_combo = QComboBox()
+        self.base_combo = NoWheelComboBox()
         self.base_combo.addItems(["Dark Base", "Light Base"])
+        set_delayed_tooltip(
+            self.base_combo,
+            "Sets default text, card, and menu contrast (Dark or Light).",
+        )
+        self.base_combo.currentIndexChanged.connect(self._on_any_change)
         r1.addWidget(self.base_combo)
         lay.addLayout(r1)
 
-        # Background card
-        bg_card = QFrame()
-        bg_card.setObjectName("Card")
-        bg_l = QVBoxLayout(bg_card)
-        bg_l.setContentsMargins(12, 10, 12, 10)
-        bg_l.setSpacing(8)
-        bg_h = QLabel("Main Background")
-        bg_h.setStyleSheet("font-size: 13px; font-weight: 600;")
-        bg_l.addWidget(bg_h)
+        # Main Window Background
+        self._bg_sec = self._build_surface_card(
+            lay,
+            title="Main Window Background",
+            styles=[("Gradient", "gradient"), ("Solid Color", "solid"), ("Picture", "image")],
+            style_tip="Choose Gradient, Solid Color, or Picture for the main window.",
+            c1_default="#071B2A",
+            c2_default="#104460",
+            thumb_size=(80, 50),
+            is_sidebar=False,
+        )
 
-        bg_r1 = QHBoxLayout()
-        bg_r1.addWidget(QLabel("Style"))
-        self.bg_type = QComboBox()
-        self.bg_type.addItems(["Gradient", "Solid Color", "Picture"])
-        bg_r1.addWidget(self.bg_type)
-        bg_r1.addWidget(QLabel("Color 1"))
-        self.bg_c1 = _ColorSwatchButton("#071B2A")
-        bg_r1.addWidget(self.bg_c1)
-        bg_r1.addWidget(QLabel("Color 2"))
-        self.bg_c2 = _ColorSwatchButton("#104460")
-        bg_r1.addWidget(self.bg_c2)
-        bg_l.addLayout(bg_r1)
+        # Left Sidebar
+        self._sb_sec = self._build_surface_card(
+            lay,
+            title="Left Sidebar",
+            styles=[("Picture (Glass)", "image"), ("Gradient", "gradient"), ("Solid Color", "solid")],
+            style_tip="Choose Picture (Glass), Gradient, or Solid Color for the left sidebar.",
+            c1_default="#0A2438",
+            c2_default="#124E63",
+            thumb_size=(44, 64),
+            is_sidebar=True,
+        )
 
-        bg_r2 = QHBoxLayout()
-        bg_r2.addWidget(QLabel("Photo"))
-        self.bg_img = QLineEdit()
-        self.bg_img.setPlaceholderText("Optional background picture (.png / .jpg)")
-        bg_br = QPushButton("Browse")
-        bg_br.setObjectName("PlatformBtn")
-        bg_br.clicked.connect(lambda: self._pick_img(self.bg_img))
-        self.bg_blur = QSpinBox()
-        self.bg_blur.setRange(0, 30)
-        self.bg_blur.setValue(6)
-        self.bg_blur.setPrefix("Blur ")
-        bg_r2.addWidget(self.bg_img, 1)
-        bg_r2.addWidget(bg_br)
-        bg_r2.addWidget(self.bg_blur)
-        bg_l.addLayout(bg_r2)
-        lay.addWidget(bg_card)
+        # Mini Window
+        self._mini_sec = self._build_surface_card(
+            lay,
+            title="Mini Window",
+            styles=[("Gradient", "gradient"), ("Solid Color", "solid"), ("Picture", "image")],
+            style_tip="Choose Gradient, Solid Color, or Picture for the Mini Window.",
+            c1_default="#071B2A",
+            c2_default="#104460",
+            thumb_size=(56, 56),
+            is_sidebar=False,
+            with_use_main_chk=True,
+        )
 
-        # Sidebar card
-        sb_card = QFrame()
-        sb_card.setObjectName("Card")
-        sb_l = QVBoxLayout(sb_card)
-        sb_l.setContentsMargins(12, 10, 12, 10)
-        sb_l.setSpacing(8)
-        sb_h = QLabel("Sidebar")
-        sb_h.setStyleSheet("font-size: 13px; font-weight: 600;")
-        sb_l.addWidget(sb_h)
-
-        sb_r1 = QHBoxLayout()
-        sb_r1.addWidget(QLabel("Style"))
-        self.sb_type = QComboBox()
-        self.sb_type.addItems(["Picture (Glass)", "Gradient", "Solid Color"])
-        sb_r1.addWidget(self.sb_type)
-        sb_r1.addWidget(QLabel("Color 1"))
-        self.sb_c1 = _ColorSwatchButton("#0A2438")
-        sb_r1.addWidget(self.sb_c1)
-        sb_r1.addWidget(QLabel("Color 2"))
-        self.sb_c2 = _ColorSwatchButton("#124E63")
-        sb_r1.addWidget(self.sb_c2)
-        sb_l.addLayout(sb_r1)
-
-        sb_r2 = QHBoxLayout()
-        sb_r2.addWidget(QLabel("Photo"))
-        self.sb_img = QLineEdit()
-        self.sb_img.setPlaceholderText("Optional sidebar photo (lightly blurred frosted look)")
-        sb_br = QPushButton("Browse")
-        sb_br.setObjectName("PlatformBtn")
-        sb_br.clicked.connect(lambda: self._pick_img(self.sb_img))
-        self.sb_blur = QSpinBox()
-        self.sb_blur.setRange(0, 30)
-        self.sb_blur.setValue(6)
-        self.sb_blur.setPrefix("Blur ")
-        sb_r2.addWidget(self.sb_img, 1)
-        sb_r2.addWidget(sb_br)
-        sb_r2.addWidget(self.sb_blur)
-        sb_l.addLayout(sb_r2)
-        lay.addWidget(sb_card)
-
-        # Accents & Waveform card
+        # Buttons, Highlights & Waveform
         ac_card = QFrame()
         ac_card.setObjectName("Card")
         ac_l = QVBoxLayout(ac_card)
         ac_l.setContentsMargins(12, 10, 12, 10)
-        ac_l.setSpacing(8)
-        ac_h = QLabel("Accents & Waveform")
+        ac_l.setSpacing(6)
+        ac_h = QLabel("Buttons, Highlights & Waveform")
         ac_h.setStyleSheet("font-size: 13px; font-weight: 600;")
+        ac_sub = QLabel("Listen button, active tabs, borders & audio waveform")
+        ac_sub.setObjectName("Muted")
+        ac_sub.setStyleSheet("font-size: 10px;")
         ac_l.addWidget(ac_h)
+        ac_l.addWidget(ac_sub)
 
         ac_r1 = QHBoxLayout()
-        ac_r1.addWidget(QLabel("Accent 1"))
+        ac_r1.setSpacing(8)
+        ac1_lbl = QLabel("Main Highlight")
+        set_delayed_tooltip(
+            ac1_lbl,
+            "Primary highlight used for the Listen button, active tabs, and waveform start.",
+        )
         self.ac1 = _ColorSwatchButton("#39C5BB")
-        ac_r1.addWidget(self.ac1)
-        ac_r1.addWidget(QLabel("Accent 2"))
+        set_delayed_tooltip(
+            self.ac1,
+            "Primary highlight used for the Listen button, active tabs, and waveform start.",
+        )
+        self.ac1.color_changed.connect(self._on_any_change)
+
+        ac2_lbl = QLabel("Secondary Highlight")
+        set_delayed_tooltip(
+            ac2_lbl,
+            "Secondary gradient color used for the Listen button and waveform end.",
+        )
         self.ac2 = _ColorSwatchButton("#38BDF8")
+        set_delayed_tooltip(
+            self.ac2,
+            "Secondary gradient color used for the Listen button and waveform end.",
+        )
+        self.ac2.color_changed.connect(self._on_any_change)
+
+        ac_r1.addWidget(ac1_lbl)
+        ac_r1.addWidget(self.ac1)
+        ac_r1.addSpacing(8)
+        ac_r1.addWidget(ac2_lbl)
         ac_r1.addWidget(self.ac2)
         ac_r1.addStretch()
         ac_l.addLayout(ac_r1)
 
         wf_r = QHBoxLayout()
+        wf_r.setSpacing(8)
         wf_r.addWidget(QLabel("Waveform"))
-        self.wf_style = QComboBox()
+        self.wf_style = NoWheelComboBox()
         self.wf_style.addItems(["Radial", "Horizontal Split", "Pulse Line", "Bottom Bar", "Dots"])
+        set_delayed_tooltip(self.wf_style, "Default waveform shape when this theme is active.")
+        self.wf_style.currentIndexChanged.connect(self._on_any_change)
         wf_r.addWidget(self.wf_style)
         self.wf_mirror = QCheckBox("Mirrored")
+        self.wf_mirror.stateChanged.connect(self._on_any_change)
         self.wf_idle_dots = QCheckBox("Idle dots when silent")
+        self.wf_idle_dots.stateChanged.connect(self._on_any_change)
         wf_r.addWidget(self.wf_mirror)
         wf_r.addWidget(self.wf_idle_dots)
         wf_r.addStretch()
@@ -681,27 +865,221 @@ class CustomThemeDialog(QDialog):
         root.addWidget(scroll, 1)
 
         footer = QHBoxLayout()
+        footer.setSpacing(8)
         tmpl_btn = QPushButton("Open Template JSON")
         tmpl_btn.setObjectName("PlatformBtn")
         tmpl_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         tmpl_btn.clicked.connect(self._open_template)
 
+        self.preview_btn = QPushButton("Preview: OFF")
+        self.preview_btn.setObjectName("PlatformBtn")
+        self.preview_btn.setCheckable(True)
+        self.preview_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        set_delayed_tooltip(
+            self.preview_btn,
+            "Live-preview this theme on the app before saving (updates 2s after edits).",
+        )
+        self.preview_btn.toggled.connect(self._on_preview_toggled)
+
         cancel_btn = QPushButton("Cancel")
-        cancel_btn.setObjectName("PlatformBtn")
+        cancel_btn.setObjectName("DangerBtn")
+        cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         cancel_btn.clicked.connect(self.reject)
 
-        save_btn = QPushButton("Save & Apply Theme")
+        save_btn = QPushButton("Save && Apply")
         save_btn.setObjectName("PrimaryBtn")
         save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         save_btn.clicked.connect(self._on_save)
 
         footer.addWidget(tmpl_btn)
         footer.addStretch()
+        footer.addWidget(self.preview_btn)
         footer.addWidget(cancel_btn)
         footer.addWidget(save_btn)
         root.addLayout(footer)
 
-    def _pick_img(self, target_edit: QLineEdit):
+        if self._raw_edit_data:
+            self._populate_from_raw(self._raw_edit_data)
+        else:
+            for sec in (self._bg_sec, self._sb_sec, self._mini_sec):
+                self._sync_section_visibility(sec)
+        self._suppress_preview = False
+
+    def _build_surface_card(
+        self,
+        parent_lay: QVBoxLayout,
+        title: str,
+        styles: list[tuple[str, str]],
+        style_tip: str,
+        c1_default: str,
+        c2_default: str,
+        thumb_size: tuple[int, int],
+        is_sidebar: bool = False,
+        with_use_main_chk: bool = False,
+    ) -> dict:
+        card = QFrame()
+        card.setObjectName("Card")
+        cl = QVBoxLayout(card)
+        cl.setContentsMargins(12, 10, 12, 10)
+        cl.setSpacing(8)
+
+        hdr_row = QHBoxLayout()
+        hdr = QLabel(title)
+        hdr.setStyleSheet("font-size: 13px; font-weight: 600;")
+        hdr_row.addWidget(hdr)
+        hdr_row.addStretch()
+
+        use_main_chk = None
+        if with_use_main_chk:
+            use_main_chk = QCheckBox("Use Main Window Background")
+            use_main_chk.setChecked(True)
+            use_main_chk.setCursor(Qt.CursorShape.PointingHandCursor)
+            set_delayed_tooltip(
+                use_main_chk,
+                "Mirror the Main Window Background in the Mini Window, or uncheck to customize it separately.",
+            )
+            hdr_row.addWidget(use_main_chk)
+        cl.addLayout(hdr_row)
+
+        content_w = QWidget()
+        content_l = QVBoxLayout(content_w)
+        content_l.setContentsMargins(0, 0, 0, 0)
+        content_l.setSpacing(8)
+
+        r1 = QHBoxLayout()
+        r1.setSpacing(8)
+        style_combo = NoWheelComboBox()
+        for label, key in styles:
+            style_combo.addItem(label, key)
+        set_delayed_tooltip(style_combo, style_tip)
+
+        c1_lbl = QLabel("Main Color")
+        set_delayed_tooltip(c1_lbl, "Primary background or gradient start color.")
+        c1_btn = _ColorSwatchButton(c1_default)
+        set_delayed_tooltip(c1_btn, "Primary background or gradient start color.")
+
+        c2_lbl = QLabel("Secondary Color")
+        set_delayed_tooltip(c2_lbl, "Gradient end color.")
+        c2_btn = _ColorSwatchButton(c2_default)
+        set_delayed_tooltip(c2_btn, "Gradient end color.")
+
+        r1.addWidget(style_combo)
+        r1.addSpacing(4)
+        r1.addWidget(c1_lbl)
+        r1.addWidget(c1_btn)
+        r1.addWidget(c2_lbl)
+        r1.addWidget(c2_btn)
+        r1.addStretch()
+        content_l.addLayout(r1)
+
+        photo_row_w = QWidget()
+        pr = QHBoxLayout(photo_row_w)
+        pr.setContentsMargins(0, 2, 0, 0)
+        pr.setSpacing(8)
+
+        preview = _PhotoPreviewWidget(thumb_size[0], thumb_size[1], is_sidebar=is_sidebar)
+        set_delayed_tooltip(preview, "Live photo preview with Blur and Darken applied. Click to change.")
+
+        name_col = QVBoxLayout()
+        name_col.setSpacing(4)
+        photo_lbl = ElidedLabel("No photo selected")
+        photo_lbl.setObjectName("Muted")
+        photo_lbl.setStyleSheet("font-size: 11px;")
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
+        br_btn = QPushButton("Browse")
+        br_btn.setObjectName("PlatformBtn")
+        br_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        clr_btn = QPushButton("✕")
+        clr_btn.setObjectName("IconDangerBtn")
+        clr_btn.setFixedSize(24, 24)
+        clr_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        set_delayed_tooltip(clr_btn, "Remove selected photo")
+        btn_row.addWidget(br_btn)
+        btn_row.addWidget(clr_btn)
+        btn_row.addStretch()
+
+        name_col.addWidget(photo_lbl)
+        name_col.addLayout(btn_row)
+
+        blur_spin = NoWheelSpinBox()
+        blur_spin.setRange(0, 30)
+        blur_spin.setValue(6)
+        blur_spin.setPrefix("Blur ")
+        set_delayed_tooltip(blur_spin, "Gaussian blur radius applied to the photo (0–30).")
+
+        darken_spin = NoWheelSpinBox()
+        darken_spin.setRange(0, 100)
+        darken_spin.setValue(_alpha_to_pct(115))
+        darken_spin.setPrefix("Darken ")
+        darken_spin.setSuffix("%")
+        set_delayed_tooltip(darken_spin, "Darkens the photo so text and buttons stay readable (0–100%).")
+
+        pr.addWidget(preview)
+        pr.addLayout(name_col, 1)
+        pr.addWidget(blur_spin)
+        pr.addWidget(darken_spin)
+        content_l.addWidget(photo_row_w)
+        cl.addWidget(content_w)
+        parent_lay.addWidget(card)
+
+        sec = {
+            "card": card,
+            "content_w": content_w,
+            "use_main_chk": use_main_chk,
+            "style_combo": style_combo,
+            "c1_btn": c1_btn,
+            "c2_lbl": c2_lbl,
+            "c2_btn": c2_btn,
+            "photo_row_w": photo_row_w,
+            "preview": preview,
+            "photo_lbl": photo_lbl,
+            "clr_btn": clr_btn,
+            "blur_spin": blur_spin,
+            "darken_spin": darken_spin,
+            "image_path": "",
+            "is_sidebar": is_sidebar,
+        }
+
+        style_combo.currentIndexChanged.connect(lambda _i=0, s=sec: self._on_section_changed(s))
+        c1_btn.color_changed.connect(lambda _c="", s=sec: self._on_section_changed(s))
+        c2_btn.color_changed.connect(lambda _c="", s=sec: self._on_section_changed(s))
+        blur_spin.valueChanged.connect(lambda _v=0, s=sec: self._on_section_changed(s))
+        darken_spin.valueChanged.connect(lambda _v=0, s=sec: self._on_section_changed(s))
+        br_btn.clicked.connect(lambda _c=False, s=sec: self._pick_img_for_section(s))
+        preview.clicked.connect(lambda s=sec: self._pick_img_for_section(s))
+        clr_btn.clicked.connect(lambda _c=False, s=sec: self._clear_img_for_section(s))
+        if use_main_chk is not None:
+            use_main_chk.stateChanged.connect(lambda _st=0, s=sec: self._on_section_changed(s))
+
+        return sec
+
+    def _sync_section_visibility(self, sec: dict):
+        if sec["use_main_chk"] is not None:
+            sec["content_w"].setVisible(not sec["use_main_chk"].isChecked())
+        mode = sec["style_combo"].currentData()
+        show_c2 = mode != "solid"
+        sec["c2_lbl"].setVisible(show_c2)
+        sec["c2_btn"].setVisible(show_c2)
+        sec["photo_row_w"].setVisible(mode == "image")
+        has_img = bool(sec["image_path"])
+        sec["clr_btn"].setVisible(has_img)
+        sec["photo_lbl"].setText(os.path.basename(sec["image_path"]) if has_img else "No photo selected")
+        sec["preview"].set_preview_config(self._section_dict(sec, for_preview=True))
+
+    def _on_section_changed(self, sec: dict):
+        self._sync_section_visibility(sec)
+        self._on_any_change()
+
+    def _on_any_change(self, *_args):
+        if self._suppress_preview:
+            return
+        if self._preview_active:
+            self.preview_btn.setText("Preview: Updating...")
+            self._preview_timer.start()
+
+    def _pick_img_for_section(self, sec: dict):
         picked, _ = QFileDialog.getOpenFileName(
             self,
             "Select Theme Picture",
@@ -709,7 +1087,189 @@ class CustomThemeDialog(QDialog):
             "Images (*.png *.jpg *.jpeg *.webp *.bmp);;All Files (*.*)",
         )
         if picked:
-            target_edit.setText(picked)
+            stored = import_theme_photo(picked)
+            sec["image_path"] = stored
+            self._sync_section_visibility(sec)
+            self._on_any_change()
+
+    def _clear_img_for_section(self, sec: dict):
+        sec["image_path"] = ""
+        self._sync_section_visibility(sec)
+        self._on_any_change()
+
+    def _section_dict(self, sec: dict, for_preview: bool = False) -> dict:
+        mode = sec["style_combo"].currentData() or "gradient"
+        img_val = sec["image_path"]
+        if for_preview and img_val:
+            img_val = resolve_theme_image_path(img_val) or img_val
+        if mode == "image" and not img_val and not for_preview:
+            mode = "gradient"
+        alpha = _pct_to_alpha(sec["darken_spin"].value())
+        out = {
+            "type": mode,
+            "color1": sec["c1_btn"].hex_value(),
+            "color2": sec["c2_btn"].hex_value(),
+            "image": img_val,
+            "blur": sec["blur_spin"].value(),
+            "darken_black": True,
+        }
+        if sec["is_sidebar"]:
+            out["glass_alpha"] = alpha
+        else:
+            out["angle"] = 135
+            out["overlay_alpha"] = alpha
+        return out
+
+    def _load_section_from_raw(self, sec: dict, raw_sec: dict, alpha_key: str):
+        stype = str(raw_sec.get("type", "gradient"))
+        for idx in range(sec["style_combo"].count()):
+            if sec["style_combo"].itemData(idx) == stype:
+                sec["style_combo"].setCurrentIndex(idx)
+                break
+        if raw_sec.get("color1"):
+            sec["c1_btn"].set_color(str(raw_sec["color1"]))
+        if raw_sec.get("color2"):
+            sec["c2_btn"].set_color(str(raw_sec["color2"]))
+        sec["image_path"] = str(raw_sec.get("image") or "")
+        sec["blur_spin"].setValue(max(0, min(30, int(raw_sec.get("blur", 6)))))
+        sec["darken_spin"].setValue(_alpha_to_pct(int(raw_sec.get(alpha_key, 115))))
+        self._sync_section_visibility(sec)
+
+    def _populate_from_raw(self, raw: dict):
+        self.name_in.setText(str(raw.get("name") or ""))
+        self.base_combo.setCurrentIndex(0 if raw.get("base_dark", True) else 1)
+
+        bg = raw.get("background") if isinstance(raw.get("background"), dict) else {}
+        sb = raw.get("sidebar") if isinstance(raw.get("sidebar"), dict) else {}
+        mini = raw.get("miniplayer") if isinstance(raw.get("miniplayer"), dict) else None
+        cols = raw.get("colors") if isinstance(raw.get("colors"), dict) else {}
+        wf = raw.get("waveform") if isinstance(raw.get("waveform"), dict) else {}
+
+        self._load_section_from_raw(self._bg_sec, bg, "overlay_alpha")
+        self._load_section_from_raw(self._sb_sec, sb, "glass_alpha")
+
+        if mini is None:
+            self._mini_sec["use_main_chk"].setChecked(True)
+            self._load_section_from_raw(self._mini_sec, bg, "overlay_alpha")
+        else:
+            self._mini_sec["use_main_chk"].setChecked(bool(mini.get("use_main_bg", False)))
+            self._load_section_from_raw(self._mini_sec, mini, "overlay_alpha")
+
+        if cols.get("accent"):
+            self.ac1.set_color(str(cols["accent"]))
+        if cols.get("accent_secondary"):
+            self.ac2.set_color(str(cols["accent_secondary"]))
+
+        wf_map = {"radial": 0, "horizontal": 1, "pulse_line": 2, "bar": 3, "dots": 4}
+        self.wf_style.setCurrentIndex(wf_map.get(str(wf.get("style", "radial")), 0))
+        self.wf_mirror.setChecked(bool(wf.get("mirror", False)))
+        self.wf_idle_dots.setChecked(bool(wf.get("idle_dots", False)))
+
+    def _build_theme_payload(self, for_preview: bool = False) -> dict:
+        name = self.name_in.text().strip() or "My Custom Theme"
+        dark = self.base_combo.currentIndex() == 0
+        wf_map = {0: "radial", 1: "horizontal", 2: "pulse_line", 3: "bar", 4: "dots"}
+
+        bg_dict = self._section_dict(self._bg_sec, for_preview=for_preview)
+        sb_dict = self._section_dict(self._sb_sec, for_preview=for_preview)
+
+        if self._mini_sec["use_main_chk"].isChecked():
+            mini_dict = copy.deepcopy(bg_dict)
+            mini_dict["use_main_bg"] = True
+        else:
+            mini_dict = self._section_dict(self._mini_sec, for_preview=for_preview)
+            mini_dict["use_main_bg"] = False
+
+        # Preserve any advanced JSON keys when editing an existing theme
+        raw_base = self._raw_edit_data if isinstance(self._raw_edit_data, dict) else {}
+        if isinstance(raw_base.get("background"), dict):
+            merged_bg = dict(raw_base["background"])
+            merged_bg.update(bg_dict)
+            bg_dict = merged_bg
+        if isinstance(raw_base.get("sidebar"), dict):
+            merged_sb = dict(raw_base["sidebar"])
+            merged_sb.update(sb_dict)
+            sb_dict = merged_sb
+        if isinstance(raw_base.get("miniplayer"), dict) and not mini_dict["use_main_bg"]:
+            merged_mini = dict(raw_base["miniplayer"])
+            merged_mini.update(mini_dict)
+            mini_dict = merged_mini
+
+        colors_dict = {
+            "accent": self.ac1.hex_value(),
+            "accent_secondary": self.ac2.hex_value(),
+            "card_bg": "rgba(15, 24, 38, 0.72)" if dark else "rgba(255, 255, 255, 0.84)",
+            "card_border": "rgba(255, 255, 255, 0.16)" if dark else "rgba(15, 23, 42, 0.14)",
+            "text": "#F4F8FF" if dark else "#0F172A",
+            "muted": "#9BB6CC" if dark else "#475569",
+        }
+        wf_dict = dict(raw_base.get("waveform")) if isinstance(raw_base.get("waveform"), dict) else {}
+        wf_dict.update(
+            {
+                "style": wf_map[self.wf_style.currentIndex()],
+                "mirror": self.wf_mirror.isChecked(),
+                "flip_hz": self.wf_mirror.isChecked(),
+                "idle_dots": self.wf_idle_dots.isChecked(),
+                "color1": self.ac1.hex_value(),
+                "color2": self.ac2.hex_value(),
+            }
+        )
+
+        payload = {
+            "id": self._edit_theme_key or "custom:__preview__",
+            "name": name,
+            "base_dark": dark,
+            "background": bg_dict,
+            "sidebar": sb_dict,
+            "miniplayer": mini_dict,
+            "colors": colors_dict,
+            "waveform": wf_dict,
+        }
+        if for_preview:
+            for sec_name in ("background", "sidebar", "miniplayer"):
+                s = payload[sec_name]
+                if s.get("type") == "image" and not s.get("image"):
+                    s["type"] = "gradient"
+            payload["waveform"] = resolve_template_waveform(payload)
+        else:
+            payload.pop("id", None)
+        return payload
+
+    def _on_preview_toggled(self, checked: bool):
+        self._preview_timer.stop()
+        self._preview_active = bool(checked)
+        if self._preview_active:
+            self.preview_btn.setText("Preview: ON")
+            self._emit_preview()
+        else:
+            self.preview_btn.setText("Preview: OFF")
+            self._stop_preview()
+
+    def _apply_debounced_preview(self):
+        if not self._preview_active:
+            return
+        self._emit_preview()
+        self.preview_btn.setText("Preview: ON")
+
+    def _emit_preview(self):
+        if callable(self._on_preview):
+            self._on_preview(self._build_theme_payload(for_preview=True))
+
+    def _stop_preview(self):
+        self._preview_timer.stop()
+        self._preview_active = False
+        if hasattr(self, "preview_btn"):
+            self.preview_btn.setText("Preview: OFF")
+        if callable(self._on_stop_preview):
+            self._on_stop_preview()
+
+    def reject(self):
+        self._stop_preview()
+        super().reject()
+
+    def closeEvent(self, event):
+        self._stop_preview()
+        super().closeEvent(event)
 
     def _open_template(self):
         tmpl = os.path.join(THEMES_DIR, TEMPLATE_FILENAME)
@@ -718,53 +1278,36 @@ class CustomThemeDialog(QDialog):
 
     def _on_save(self):
         name = self.name_in.text().strip() or "My Custom Theme"
-        dark = self.base_combo.currentIndex() == 0
-        bg_map = {0: "gradient", 1: "solid", 2: "image"}
-        sb_map = {0: "image", 1: "gradient", 2: "solid"}
-        wf_map = {0: "radial", 1: "horizontal", 2: "pulse_line", 3: "bar", 4: "dots"}
+        conflict = find_theme_name_conflict(name, ignore_theme_key=self._edit_theme_key)
+        if conflict:
+            QMessageBox.warning(
+                self,
+                "Theme Name Already Exists",
+                f"A theme named '{conflict}' already exists.\nPlease choose a different name.",
+            )
+            self.name_in.setFocus()
+            self.name_in.selectAll()
+            return
 
-        bg_mode = bg_map[self.bg_type.currentIndex()]
-        sb_mode = sb_map[self.sb_type.currentIndex()]
-        if bg_mode == "image" and not self.bg_img.text().strip():
-            bg_mode = "gradient"
-        if sb_mode == "image" and not self.sb_img.text().strip():
-            sb_mode = "gradient"
+        for sec in (self._bg_sec, self._sb_sec, self._mini_sec):
+            if sec["image_path"]:
+                sec["image_path"] = import_theme_photo(sec["image_path"])
 
-        data = {
-            "name": name,
-            "base_dark": dark,
-            "background": {
-                "type": bg_mode,
-                "color1": self.bg_c1.hex_value(),
-                "color2": self.bg_c2.hex_value(),
-                "angle": 135,
-                "image": self.bg_img.text().strip(),
-                "blur": self.bg_blur.value(),
-                "overlay_alpha": 115,
-            },
-            "sidebar": {
-                "type": sb_mode,
-                "color1": self.sb_c1.hex_value(),
-                "color2": self.sb_c2.hex_value(),
-                "image": self.sb_img.text().strip(),
-                "blur": self.sb_blur.value(),
-                "glass_alpha": 120,
-            },
-            "colors": {
-                "accent": self.ac1.hex_value(),
-                "accent_secondary": self.ac2.hex_value(),
-                "card_bg": "rgba(15, 24, 38, 0.72)" if dark else "rgba(255, 255, 255, 0.84)",
-                "card_border": "rgba(255, 255, 255, 0.16)" if dark else "rgba(15, 23, 42, 0.14)",
-                "text": "#F4F8FF" if dark else "#0F172A",
-                "muted": "#9BB6CC" if dark else "#475569",
-            },
-            "waveform": {
-                "style": wf_map[self.wf_style.currentIndex()],
-                "mirror": self.wf_mirror.isChecked(),
-                "idle_dots": self.wf_idle_dots.isChecked(),
-                "color1": self.ac1.hex_value(),
-                "color2": self.ac2.hex_value(),
-            },
-        }
-        self.created_theme_key = save_custom_theme(name, data)
+        data = self._build_theme_payload(for_preview=False)
+        record_saved_theme_colors(
+            [
+                self._bg_sec["c1_btn"].hex_value(),
+                self._bg_sec["c2_btn"].hex_value(),
+                self._sb_sec["c1_btn"].hex_value(),
+                self._sb_sec["c2_btn"].hex_value(),
+                self._mini_sec["c1_btn"].hex_value(),
+                self._mini_sec["c2_btn"].hex_value(),
+                self.ac1.hex_value(),
+                self.ac2.hex_value(),
+            ]
+        )
+        self._stop_preview()
+        self.created_theme_key = save_custom_theme(
+            name, data, previous_theme_key=self._edit_theme_key
+        )
         self.accept()

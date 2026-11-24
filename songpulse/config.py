@@ -39,6 +39,7 @@ TEMP_DIR = os.path.join(DATA_DIR, "temp")
 MODELS_DIR = os.path.join(DATA_DIR, "models")
 ICONS_DIR = os.path.join(DATA_DIR, "ui_icons")
 THEMES_DIR = os.path.join(DATA_DIR, "themes")
+THEME_PHOTOS_DIR = os.path.join(THEMES_DIR, "photos")
 AI_RUNTIME_DIR = os.path.join(DATA_DIR, "ai_runtime")
 TOOLS_DIR = os.path.join(DATA_DIR, "tools")
 HISTORY_FILE = os.path.join(DATA_DIR, "history.json")
@@ -49,7 +50,7 @@ PING_SOUND_FILE = os.path.join(DATA_DIR, "ping.wav")
 SAVED_CLIP_WAV = os.path.join(TEMP_DIR, "saved_test_clip.wav")
 SINGLE_INSTANCE_KEY = "SongPulse_SingleInstance_LocalServer_v1"
 
-for _d in (DATA_DIR, COVERS_DIR, TEMP_DIR, MODELS_DIR, ICONS_DIR, THEMES_DIR):
+for _d in (DATA_DIR, COVERS_DIR, TEMP_DIR, MODELS_DIR, ICONS_DIR, THEMES_DIR, THEME_PHOTOS_DIR):
     os.makedirs(_d, exist_ok=True)
 
 
@@ -276,6 +277,7 @@ DEFAULT_SETTINGS = {
     "ytdlp_app_path": "",
     "ytdlp_quick_download_mp3": True,
     "preview_volume": 50,
+    "saved_theme_colors": [],
 }
 
 
@@ -540,6 +542,53 @@ def save_settings(settings):
         pass
 
 
+_HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+
+
+def get_saved_theme_colors() -> list[str]:
+    """Returns up to 16 recently applied theme hex colors from settings.json."""
+    raw = load_settings().get("saved_theme_colors", [])
+    out = []
+    seen = set()
+    for col in raw if isinstance(raw, list) else []:
+        s = str(col or "").strip().upper()
+        if _HEX_COLOR_RE.match(s) and s not in seen:
+            seen.add(s)
+            out.append(s)
+            if len(out) >= 16:
+                break
+    return out
+
+
+def record_saved_theme_colors(colors: list[str]) -> list[str]:
+    """Prepends valid hex colors (MRU, max 16) and persists saved_theme_colors to settings.json."""
+    existing = get_saved_theme_colors()
+    merged = []
+    seen = set()
+    for col in list(colors or []) + existing:
+        s = str(col or "").strip().upper()
+        if _HEX_COLOR_RE.match(s) and s not in seen:
+            seen.add(s)
+            merged.append(s)
+            if len(merged) >= 16:
+                break
+
+    disk_data = {}
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    disk_data = loaded
+        except Exception:
+            disk_data = {}
+    if not disk_data:
+        disk_data = DEFAULT_SETTINGS.copy()
+    disk_data["saved_theme_colors"] = merged
+    save_settings(disk_data)
+    return merged
+
+
 def load_history():
     if os.path.exists(HISTORY_FILE):
         try:
@@ -774,10 +823,86 @@ def get_storage_breakdown(history: list | None = None) -> dict:
     ai_runtime_bytes = _dir_size(AI_RUNTIME_DIR) if os.path.isdir(AI_RUNTIME_DIR) else 0
     history_bytes = os.path.getsize(HISTORY_FILE) if os.path.isfile(HISTORY_FILE) else 0
 
+    used_theme_photos = set()
+    used_theme_photo_basenames = set()
+    if os.path.isdir(THEMES_DIR):
+        for root, _dirs, files in os.walk(THEMES_DIR):
+            for fname in files:
+                if not fname.lower().endswith(".json") or fname.lower() == "_template.json":
+                    continue
+                jpath = os.path.join(root, fname)
+                try:
+                    with open(jpath, "r", encoding="utf-8") as f:
+                        tdata = json.load(f)
+                    if not isinstance(tdata, dict):
+                        continue
+                    for sec in ("background", "sidebar", "miniplayer"):
+                        sec_cfg = tdata.get(sec)
+                        if not isinstance(sec_cfg, dict):
+                            continue
+                        img_val = str(sec_cfg.get("image") or "").strip()
+                        if not img_val:
+                            continue
+                        used_theme_photo_basenames.add(os.path.basename(img_val).lower())
+                        norm_rel = os.path.normcase(os.path.normpath(img_val))
+                        used_theme_photos.add(norm_rel)
+                        if not os.path.isabs(img_val):
+                            used_theme_photos.add(
+                                os.path.normcase(os.path.abspath(os.path.join(root, img_val)))
+                            )
+                            used_theme_photos.add(
+                                os.path.normcase(os.path.abspath(os.path.join(THEMES_DIR, img_val)))
+                            )
+                        else:
+                            used_theme_photos.add(os.path.normcase(os.path.abspath(img_val)))
+                except Exception:
+                    pass
+
+    _img_exts = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif")
+    _legacy_template_imgs = {
+        "miku_sidebar.png",
+        "miku_miniplayer.png",
+        "teto_sidebar.png",
+        "teto_miniplayer.png",
+    }
+    all_theme_photo_files = []
+    all_theme_photo_bytes = 0
+    unused_theme_photo_files = []
+    unused_theme_photo_bytes = 0
+
+    def _scan_theme_photo_entry(fpath: str, fname: str):
+        nonlocal all_theme_photo_bytes, unused_theme_photo_bytes
+        try:
+            sz = os.path.getsize(fpath)
+        except OSError:
+            return
+        all_theme_photo_bytes += sz
+        all_theme_photo_files.append(fpath)
+        abs_norm = os.path.normcase(os.path.abspath(fpath))
+        base_low = fname.lower()
+        if abs_norm not in used_theme_photos and base_low not in used_theme_photo_basenames:
+            unused_theme_photo_bytes += sz
+            unused_theme_photo_files.append(fpath)
+
+    if os.path.isdir(THEME_PHOTOS_DIR):
+        for entry in os.scandir(THEME_PHOTOS_DIR):
+            if entry.is_file() and entry.name.lower().endswith(_img_exts):
+                _scan_theme_photo_entry(entry.path, entry.name)
+
+    if os.path.isdir(THEMES_DIR):
+        for entry in os.scandir(THEMES_DIR):
+            if (
+                entry.is_file()
+                and entry.name.lower().endswith(_img_exts)
+                and entry.name.lower() not in _legacy_template_imgs
+            ):
+                _scan_theme_photo_entry(entry.path, entry.name)
+
     total_bytes = (
         temp_bytes
         + log_bytes
         + all_cover_bytes
+        + all_theme_photo_bytes
         + sum(m["bytes"] for m in models)
         + model_meta_bytes
         + ai_runtime_bytes
@@ -793,6 +918,10 @@ def get_storage_breakdown(history: list | None = None) -> dict:
         "unused_cover_bytes": unused_cover_bytes,
         "all_cover_files": all_cover_files,
         "all_cover_bytes": all_cover_bytes,
+        "unused_theme_photo_files": unused_theme_photo_files,
+        "unused_theme_photo_bytes": unused_theme_photo_bytes,
+        "all_theme_photo_files": all_theme_photo_files,
+        "all_theme_photo_bytes": all_theme_photo_bytes,
         "models": models,
         "model_meta_files": model_meta_files,
         "model_meta_bytes": model_meta_bytes,

@@ -1,6 +1,7 @@
 import ctypes
 import ctypes.wintypes
 import math
+import os
 import time
 import webbrowser
 
@@ -61,11 +62,31 @@ from .config import (
     set_window_always_on_top,
     set_windows_titlebar_theme,
 )
-from .theme import create_app_pixmap, create_ui_icon, render_blurred_pixmap, rounded_pixmap
+from .theme import (
+    create_app_pixmap,
+    create_ui_icon,
+    get_cached_blurred_source,
+    render_blurred_pixmap,
+    rounded_pixmap,
+)
+from .themes_manager import resolve_theme_image_path
+from .waveforms import (
+    paint_miku_centerline_bars,
+    paint_miku_centerline_pulse,
+    paint_miku_hair_ties,
+    paint_teto_bow,
+)
 from .workers import build_song_platform_links
 
 
-def _paint_surface(painter: QPainter, rect: QRect, cfg: dict, cache_dict: dict, is_sidebar: bool = False):
+def _paint_surface(
+    painter: QPainter,
+    rect: QRect,
+    cfg: dict,
+    cache_dict: dict,
+    is_sidebar: bool = False,
+    exact_thumb: bool = False,
+):
     """Paints solid color, angled linear gradient, or photo/cutout with glass overlay."""
     mode = (cfg or {}).get("type", "solid")
     c1 = QColor((cfg or {}).get("color1", "#111216"))
@@ -85,22 +106,60 @@ def _paint_surface(painter: QPainter, rect: QRect, cfg: dict, cache_dict: dict, 
         painter.fillRect(rect, c1)
 
     if mode == "image" and (cfg or {}).get("image"):
-        img_path = cfg["image"]
+        img_path = str(cfg["image"])
+        if not os.path.isfile(img_path):
+            img_path = resolve_theme_image_path(img_path)
         blur = int(cfg.get("blur", 8 if is_sidebar else 6))
         fit_mode = str(cfg.get("fit", "cover"))
-        key = (img_path, rect.width(), rect.height(), blur, fit_mode)
-        pix = cache_dict.get(key)
-        if pix is None:
-            cache_dict.clear()
-            pix = render_blurred_pixmap(
-                img_path, rect.width(), rect.height(), blur, fit_mode=fit_mode
-            )
-            cache_dict[key] = pix
-        if not pix.isNull():
-            painter.drawPixmap(rect.topLeft(), pix)
+        if exact_thumb:
+            key = (img_path, rect.width(), rect.height(), blur, fit_mode)
+            pix = cache_dict.get(key)
+            if pix is None:
+                cache_dict.clear()
+                pix = render_blurred_pixmap(
+                    img_path, rect.width(), rect.height(), blur, fit_mode=fit_mode
+                )
+                cache_dict[key] = pix
+            if not pix.isNull():
+                painter.drawPixmap(rect.topLeft(), pix)
+        else:
+            pix = get_cached_blurred_source(img_path, blur_radius=blur)
+            if not pix.isNull() and rect.width() > 2 and rect.height() > 2:
+                painter.save()
+                painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+                iw = float(pix.width())
+                ih = float(pix.height())
+                w = float(rect.width())
+                h = float(rect.height())
+                if fit_mode == "cutout":
+                    scale = max((w * 1.18) / max(1.0, iw), (h * 0.68) / max(1.0, ih))
+                    nw = iw * scale
+                    nh = ih * scale
+                    paste_x = (w - nw) / 2.0
+                    paste_y = max(h * 0.24, h - nh + nh * 0.08)
+                    painter.setClipRect(rect)
+                    painter.drawPixmap(
+                        QRectF(rect.x() + paste_x, rect.y() + paste_y, nw, nh),
+                        pix,
+                        QRectF(0.0, 0.0, iw, ih),
+                    )
+                else:
+                    scale = max(w / max(1.0, iw), h / max(1.0, ih))
+                    sw = w / scale
+                    sh = h / scale
+                    sx = (iw - sw) / 2.0
+                    sy = (ih - sh) / 2.0
+                    painter.drawPixmap(QRectF(rect), pix, QRectF(sx, sy, sw, sh))
+                painter.restore()
+
+        if img_path:
             alpha = int(cfg.get("glass_alpha" if is_sidebar else "overlay_alpha", 115))
             if alpha > 0:
-                overlay = QColor(c1.red(), c1.green(), c1.blue(), max(0, min(240, alpha)))
+                a_val = max(0, min(240, alpha))
+                if cfg.get("darken_black", False):
+                    overlay = QColor(0, 0, 0, a_val)
+                else:
+                    overlay = QColor(c1.red(), c1.green(), c1.blue(), a_val)
                 painter.fillRect(rect, overlay)
 
 
@@ -114,8 +173,12 @@ class ThemedBackgroundWidget(QWidget):
         self._pix_cache = {}
 
     def set_background_config(self, cfg: dict):
-        self._bg_cfg = dict(cfg or {})
-        self._pix_cache.clear()
+        new_cfg = dict(cfg or {})
+        old_sig = (self._bg_cfg.get("image"), self._bg_cfg.get("blur"), self._bg_cfg.get("fit"))
+        new_sig = (new_cfg.get("image"), new_cfg.get("blur"), new_cfg.get("fit"))
+        self._bg_cfg = new_cfg
+        if old_sig != new_sig:
+            self._pix_cache.clear()
         self.update()
 
     def paintEvent(self, event):
@@ -135,8 +198,12 @@ class GlassSidebarFrame(QFrame):
         self._pix_cache = {}
 
     def set_sidebar_config(self, cfg: dict):
-        self._sb_cfg = dict(cfg or {})
-        self._pix_cache.clear()
+        new_cfg = dict(cfg or {})
+        old_sig = (self._sb_cfg.get("image"), self._sb_cfg.get("blur"), self._sb_cfg.get("fit"))
+        new_sig = (new_cfg.get("image"), new_cfg.get("blur"), new_cfg.get("fit"))
+        self._sb_cfg = new_cfg
+        if old_sig != new_sig:
+            self._pix_cache.clear()
         self.update()
 
     def paintEvent(self, event):
@@ -1329,148 +1396,10 @@ class PulseIdentifyWidget(QWidget):
             p.drawEllipse(QPointF(cx, cy), radius, radius)
 
     def _paint_miku_hair_ties(self, p: QPainter, cx: float, cy: float):
-        """Draws Miku's thick black-and-pink diamond ponytail ornaments centered right on the left & right sides of the Listen button."""
-        p.save()
-        clip = QPainterPath()
-        clip.addRect(0.0, 0.0, float(self.width()), float(self.height()))
-        btn_hole = QPainterPath()
-        btn_hole.addEllipse(QPointF(cx, cy), 65.5, 65.5)
-        p.setClipPath(clip.subtracted(btn_hole))
-
-        rx = 18.0
-        ry = 30.0
-        for side in (-1, 1):
-            dcx = cx + side * 66.0
-            pts = QPolygonF(
-                [
-                    QPointF(dcx, cy - ry),
-                    QPointF(dcx + rx, cy),
-                    QPointF(dcx, cy + ry),
-                    QPointF(dcx - rx, cy),
-                ]
-            )
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            p.setPen(
-                QPen(
-                    QColor(244, 63, 94, 72),
-                    13.0,
-                    Qt.PenStyle.SolidLine,
-                    Qt.PenCapStyle.SquareCap,
-                    Qt.PenJoinStyle.MiterJoin,
-                )
-            )
-            p.drawPolygon(pts)
-            p.setPen(
-                QPen(
-                    QColor("#141720"),
-                    9.4,
-                    Qt.PenStyle.SolidLine,
-                    Qt.PenCapStyle.SquareCap,
-                    Qt.PenJoinStyle.MiterJoin,
-                )
-            )
-            p.drawPolygon(pts)
-            p.setPen(
-                QPen(
-                    QColor("#F43F5E"),
-                    3.6,
-                    Qt.PenStyle.SolidLine,
-                    Qt.PenCapStyle.SquareCap,
-                    Qt.PenJoinStyle.MiterJoin,
-                )
-            )
-            p.drawPolygon(pts)
-
-        p.restore()
+        paint_miku_hair_ties(p, float(self.width()), float(self.height()), cx, cy)
 
     def _paint_teto_bow(self, p: QPainter, cx: float, cy: float):
-        """Draws Kasane Teto's white double-ear ribbon hairtie perched on the top-right of the Listen button."""
-        p.save()
-        clip = QPainterPath()
-        clip.addRect(0.0, 0.0, float(self.width()), float(self.height()))
-        btn_hole = QPainterPath()
-        btn_hole.addEllipse(QPointF(cx, cy), 65.0, 65.0)
-        p.setClipPath(clip.subtracted(btn_hole))
-
-        p.translate(cx + 47.0, cy - 44.5)
-        p.rotate(30.0)
-
-        # Left/inner shorter pointed white ribbon ear
-        ear_left = QPainterPath()
-        ear_left.moveTo(0.0, 2.0)
-        ear_left.cubicTo(-13.0, -7.0, -18.0, -18.0, -11.0, -31.0)
-        ear_left.cubicTo(-4.0, -22.0, 0.0, -12.0, 4.0, -1.0)
-        ear_left.closeSubpath()
-
-        # Right/main taller pointed white ribbon ear sweeping upward-right
-        ear_right = QPainterPath()
-        ear_right.moveTo(1.0, -1.0)
-        ear_right.cubicTo(3.0, -18.0, 10.0, -30.0, 20.0, -38.0)
-        ear_right.cubicTo(24.0, -23.0, 21.0, -10.0, 8.0, 4.0)
-        ear_right.closeSubpath()
-
-        # Soft white outer halo so the bow lifts cleanly off the dark crimson background
-        glow_pen = QPen(
-            QColor(255, 245, 248, 56),
-            7.0,
-            Qt.PenStyle.SolidLine,
-            Qt.PenCapStyle.RoundCap,
-            Qt.PenJoinStyle.RoundJoin,
-        )
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.setPen(glow_pen)
-        p.drawPath(ear_left)
-        p.drawPath(ear_right)
-
-        # Crisp anime ink outline + bright white gradient fill for both ears
-        outline_pen = QPen(
-            QColor("#1A1116"),
-            2.2,
-            Qt.PenStyle.SolidLine,
-            Qt.PenCapStyle.RoundCap,
-            Qt.PenJoinStyle.RoundJoin,
-        )
-        grad_l = QLinearGradient(QPointF(-12.0, -30.0), QPointF(2.0, 2.0))
-        grad_l.setColorAt(0.0, QColor("#FFFFFF"))
-        grad_l.setColorAt(0.72, QColor("#F1F5F9"))
-        grad_l.setColorAt(1.0, QColor("#CBD5E1"))
-        p.setPen(outline_pen)
-        p.setBrush(QBrush(grad_l))
-        p.drawPath(ear_left)
-
-        grad_r = QLinearGradient(QPointF(18.0, -36.0), QPointF(5.0, 3.0))
-        grad_r.setColorAt(0.0, QColor("#FFFFFF"))
-        grad_r.setColorAt(0.68, QColor("#F8FAFC"))
-        grad_r.setColorAt(1.0, QColor("#CBD5E1"))
-        p.setBrush(QBrush(grad_r))
-        p.drawPath(ear_right)
-
-        # Subtle silver crease lines inside the ribbon loops
-        crease_pen = QPen(QColor("#94A3B8"), 1.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.setPen(crease_pen)
-        fold_l = QPainterPath()
-        fold_l.moveTo(-2.0, -3.0)
-        fold_l.quadTo(-9.0, -13.0, -9.5, -22.0)
-        p.drawPath(fold_l)
-        fold_r = QPainterPath()
-        fold_r.moveTo(6.0, -3.0)
-        fold_r.quadTo(12.0, -16.0, 16.5, -28.0)
-        p.drawPath(fold_r)
-
-        # Small rounded ribbon knot sitting on the top-right curve of the button
-        p.save()
-        p.translate(4.0, 0.5)
-        p.rotate(42.0)
-        knot_grad = QLinearGradient(QPointF(-6.0, -5.0), QPointF(6.0, 5.0))
-        knot_grad.setColorAt(0.0, QColor("#FFFFFF"))
-        knot_grad.setColorAt(1.0, QColor("#CBD5E1"))
-        p.setPen(outline_pen)
-        p.setBrush(QBrush(knot_grad))
-        p.drawRoundedRect(QRectF(-7.5, -4.8, 15.0, 9.6), 4.2, 4.2)
-        p.restore()
-
-        p.restore()
+        paint_teto_bow(p, float(self.width()), float(self.height()), cx, cy)
 
     def _paint_radial(self, p: QPainter, cx: float, cy: float):
         inner_r = 75.0
@@ -1503,7 +1432,7 @@ class PulseIdentifyWidget(QWidget):
             blend = 0.5 + 0.5 * math.sin(theta + self._phase * 0.35)
             r, g, b = self._bar_color(blend)
 
-            bar_len = amp * max_bar_len
+            bar_len = max(0.2, amp * max_bar_len) if self._wf_idle_dots else (amp * max_bar_len)
             x1 = cx + math.cos(theta) * inner_r
             y1 = cy + math.sin(theta) * inner_r
             x2 = cx + math.cos(theta) * (inner_r + bar_len)
@@ -1511,8 +1440,9 @@ class PulseIdentifyWidget(QWidget):
 
             core_w = 6.8 + min(1.0, amp * 3.0) * 3.2
             glow_w = core_w + 4.4
-            glow_a = int((28 + amp * 68) * vis)
-            core_a = int((165 + min(90, amp * 105)) * vis)
+            idle_dim = 0.62 + 0.38 * self._vis_alpha if self._wf_idle_dots else vis
+            glow_a = int((28 + amp * 68) * idle_dim)
+            core_a = int((165 + min(90, amp * 105)) * idle_dim)
 
             p.setPen(QPen(QColor(r, g, b, glow_a), glow_w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
             p.drawLine(QPointF(x1, y1), QPointF(x2, y2))
@@ -1536,19 +1466,16 @@ class PulseIdentifyWidget(QWidget):
 
         # Miku theme: subtle thin straight gray centerline connecting the Listen button behind & between waveforms
         if self._wf_hair_ties:
-            end_x_dist = btn_gap + (bars_per_side - 1) * step
-            p.setPen(QPen(QColor(186, 200, 214, 72), 0.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-            for side in (-1, 1):
-                p.drawLine(
-                    QPointF(cx + side * 66.0, cy),
-                    QPointF(cx + side * end_x_dist, cy),
-                )
+            paint_miku_centerline_bars(p, cx, cy, btn_gap, bars_per_side, step)
 
         max_half_h = 46.0
 
         for side in (-1, 1):
-            # True stereo L/R: left bars react to Left audio channel, right bars to Right channel
-            channel_bars = self._bars_l if side == -1 else self._bars_r
+            # True stereo L/R unless Mirrored is enabled
+            if self._wf_mirror:
+                channel_bars = self._bars
+            else:
+                channel_bars = self._bars_l if side == -1 else self._bars_r
             n_src = len(channel_bars)
             for idx in range(bars_per_side):
                 x = cx + side * (btn_gap + idx * step)
@@ -1566,7 +1493,7 @@ class PulseIdentifyWidget(QWidget):
                 else:
                     r, g, b = self._bar_color(blend)
 
-                half_h = max(0.1, amp * max_half_h)
+                half_h = max(0.2, amp * max_half_h) if self._wf_idle_dots else max(0.1, amp * max_half_h)
                 active_factor = min(1.0, amp * 4.0)
                 core_w = 6.2 + active_factor * 1.4
                 glow_w = core_w + 4.5
@@ -1607,22 +1534,7 @@ class PulseIdentifyWidget(QWidget):
 
         # Miku subtle light gray centerline behind the waveform, fading out cleanly toward the outside
         if self._wf_hair_ties:
-            for side in (-1, 1):
-                lx0 = cx + side * 65.0
-                lx1 = cx + side * end_dist
-                line_grad = QLinearGradient(QPointF(lx0, cy), QPointF(lx1, cy))
-                line_grad.setColorAt(0.0, QColor(186, 200, 214, 72))
-                line_grad.setColorAt(0.88, QColor(186, 200, 214, 68))
-                line_grad.setColorAt(1.0, QColor(186, 200, 214, 0))
-                p.setPen(
-                    QPen(
-                        QBrush(line_grad),
-                        0.8,
-                        Qt.PenStyle.SolidLine,
-                        Qt.PenCapStyle.FlatCap,
-                    )
-                )
-                p.drawLine(QPointF(lx0, cy), QPointF(lx1, cy))
+            paint_miku_centerline_pulse(p, cx, cy, end_dist)
 
         max_amp = 50.0
         idle_dim = 0.65 + 0.35 * self._vis_alpha if self._wf_idle_dots else vis
@@ -1638,8 +1550,11 @@ class PulseIdentifyWidget(QWidget):
             return src_bars[i0] * (1.0 - frac) + src_bars[i1] * frac
 
         for side in (-1, 1):
-            # True stereo: left side reacts strictly to Left audio channel, right side to Right channel
-            channel_bars = self._bars_l if side == -1 else self._bars_r
+            # True stereo unless Mirrored is enabled
+            if self._wf_mirror:
+                channel_bars = self._bars
+            else:
+                channel_bars = self._bars_l if side == -1 else self._bars_r
             path = QPainterPath()
             path.moveTo(cx + side * (start_gap - step), cy)
 
@@ -1722,7 +1637,7 @@ class PulseIdentifyWidget(QWidget):
             x = start_x + i * step
             blend = i / max(1, count - 1)
             r, g, b = self._bar_color(blend)
-            h = amp * max_h
+            h = max(0.2, amp * max_h) if self._wf_idle_dots else (amp * max_h)
             idle_dim = 0.62 + 0.38 * self._vis_alpha if self._wf_idle_dots else vis
             p.setPen(QPen(QColor(r, g, b, int((28 + amp * 65) * idle_dim)), 10.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
             p.drawLine(QPointF(x, base_y - h), QPointF(x, base_y + h * 0.35))
@@ -2109,8 +2024,7 @@ def _popup_theme_tokens(dark: bool, theme_cfg: dict | None = None) -> dict:
     border = cols.get("card_border") or ("#2F3344" if dark else "#CBD4E1")
 
     use_grad = (
-        t_id in ("miku", "teto")
-        or t_id.startswith("custom:")
+        bool(t_id and t_id not in ("dark", "light", "auto"))
         or bg_cfg.get("type") == "gradient"
     )
     if use_grad and bg_cfg.get("color1"):
@@ -2515,7 +2429,12 @@ class MiniIdentifyWindow(QWidget):
     def apply_theme_config(self, dark: bool, cfg: dict | None, wf_kwargs: dict | None = None):
         self._dark = bool(dark)
         self._accent = (cfg or {}).get("colors", {}).get("accent", "#3B82F6")
-        bg_cfg = (cfg or {}).get("miniplayer") or (cfg or {}).get("background", {})
+        mini_cfg = (cfg or {}).get("miniplayer") or {}
+        bg_cfg = (
+            (cfg or {}).get("background", {})
+            if mini_cfg.get("use_main_bg")
+            else (mini_cfg or (cfg or {}).get("background", {}))
+        )
         self.bg_widget.set_background_config(bg_cfg)
         self.pulse_btn.set_dark(self._dark)
         if wf_kwargs:

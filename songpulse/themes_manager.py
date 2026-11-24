@@ -1,22 +1,13 @@
+import hashlib
 import json
 import os
 import re
 import shutil
 
-from PyQt6.QtCore import QPointF, QRectF, Qt
-from PyQt6.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPen, QPixmap, QRadialGradient
-
-from .config import APP_DIR, THEMES_DIR
+from .config import APP_DIR, THEME_PHOTOS_DIR, THEMES_DIR
+from .waveforms import resolve_template_waveform
 
 TEMPLATE_FILENAME = "_template.json"
-MIKU_SIDEBAR_IMG = os.path.join(THEMES_DIR, "miku_sidebar.png")
-_BUNDLED_MIKU_ASSET = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "miku_sidebar.png")
-TETO_SIDEBAR_IMG = os.path.join(THEMES_DIR, "teto_sidebar.png")
-_BUNDLED_TETO_ASSET = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "teto_sidebar.png")
-MIKU_MINI_IMG = os.path.join(THEMES_DIR, "miku_miniplayer.png")
-_BUNDLED_MIKU_MINI_ASSET = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "miku_miniplayer.png")
-TETO_MINI_IMG = os.path.join(THEMES_DIR, "teto_miniplayer.png")
-_BUNDLED_TETO_MINI_ASSET = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "teto_miniplayer.png")
 
 THEME_TEMPLATE = {
     "_comment": "SongPulse Custom Theme Template. Copy and rename this file (e.g. my_theme.json) in the themes folder, or use Settings -> Create Theme.",
@@ -30,6 +21,7 @@ THEME_TEMPLATE = {
         "image": "",
         "blur": 6,
         "overlay_alpha": 115,
+        "darken_black": True,
     },
     "sidebar": {
         "type": "gradient",  # "solid", "gradient", or "image"
@@ -38,6 +30,18 @@ THEME_TEMPLATE = {
         "image": "",
         "blur": 8,
         "glass_alpha": 135,
+        "darken_black": True,
+    },
+    "miniplayer": {
+        "use_main_bg": True,
+        "type": "gradient",  # "solid", "gradient", or "image"
+        "color1": "#0B1628",
+        "color2": "#132E4A",
+        "angle": 135,
+        "image": "",
+        "blur": 6,
+        "overlay_alpha": 115,
+        "darken_black": True,
     },
     "colors": {
         "accent": "#38BDF8",
@@ -57,141 +61,24 @@ THEME_TEMPLATE = {
 }
 
 
-def ensure_miku_sidebar_art() -> str:
-    """Returns Miku character sidebar image (prefers bundled character art, copies to themes folder)."""
-    os.makedirs(THEMES_DIR, exist_ok=True)
-    for cand in (
-        _BUNDLED_MIKU_ASSET,
-        os.path.join(APP_DIR, "_internal", "songpulse", "assets", "miku_sidebar.png"),
-        os.path.join(APP_DIR, "songpulse", "assets", "miku_sidebar.png"),
-    ):
-        if os.path.isfile(cand):
-            try:
-                if (not os.path.isfile(MIKU_SIDEBAR_IMG)) or (
-                    os.path.getsize(MIKU_SIDEBAR_IMG) != os.path.getsize(cand)
-                ):
-                    shutil.copy2(cand, MIKU_SIDEBAR_IMG)
-            except OSError:
-                return cand
-            return MIKU_SIDEBAR_IMG
-    if os.path.isfile(MIKU_SIDEBAR_IMG):
-        return MIKU_SIDEBAR_IMG
-    try:
-        os.makedirs(THEMES_DIR, exist_ok=True)
-        w, h = 420, 960
-        pix = QPixmap(w, h)
-        pix.fill(QColor("#061822"))
-        p = QPainter(pix)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        # Deep cyan-blue base gradient
-        bg = QLinearGradient(0, 0, w, h)
-        bg.setColorAt(0.0, QColor("#041926"))
-        bg.setColorAt(0.45, QColor("#0A3B54"))
-        bg.setColorAt(0.85, QColor("#126E7D"))
-        bg.setColorAt(1.0, QColor("#062333"))
-        p.fillRect(0, 0, w, h, QBrush(bg))
-
-        # Soft glowing vocaloid aura orbs
-        for cx, cy, rad, col in [
-            (310, 180, 220, QColor(57, 197, 187, 130)),
-            (80, 520, 250, QColor(56, 189, 248, 120)),
-            (340, 810, 230, QColor(244, 114, 182, 80)),
-            (180, 320, 170, QColor(125, 211, 252, 95)),
-        ]:
-            rg = QRadialGradient(QPointF(cx, cy), rad)
-            rg.setColorAt(0.0, col)
-            rg.setColorAt(1.0, QColor(0, 0, 0, 0))
-            p.setBrush(QBrush(rg))
-            p.setPen(Qt.PenStyle.NoPen)
-            p.drawEllipse(QPointF(cx, cy), rad, rad)
-
-        # Stylized sweeping twin-tail turquoise ribbons & equalizer accent stripes
-        p.setPen(QPen(QColor(57, 197, 187, 145), 14, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-        p.drawArc(QRectF(-90, 90, 380, 620), -30 * 16, 130 * 16)
-        p.setPen(QPen(QColor(125, 211, 252, 110), 8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-        p.drawArc(QRectF(60, 240, 420, 660), 110 * 16, 125 * 16)
-
-        # Subtle magenta hair-tie accent bars ("01" vibe)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QBrush(QColor(244, 114, 182, 165)))
-        p.drawRoundedRect(QRectF(36, 730, 54, 10), 5, 5)
-        p.drawRoundedRect(QRectF(36, 748, 34, 8), 4, 4)
-
-        # Subtle vertical soundwave motif
-        for idx, bh in enumerate([32, 68, 112, 84, 140, 96, 56, 36]):
-            x = 240 + idx * 18
-            y = 660 - bh / 2
-            p.setBrush(QBrush(QColor(186, 248, 244, 95)))
-            p.drawRoundedRect(QRectF(x, y, 8, bh), 4, 4)
-
-        p.end()
-        pix.save(MIKU_SIDEBAR_IMG, "PNG")
-    except Exception:
-        return ""
-    return MIKU_SIDEBAR_IMG
+def theme_slug(name: str) -> str:
+    slug = re.sub(r"[^a-z0-9_-]+", "_", (name or "custom_theme").strip().lower()).strip("_")
+    if not slug or slug == "_template":
+        return "custom_theme"
+    return slug
 
 
-def ensure_teto_sidebar_art() -> str:
-    """Returns Teto character sidebar cutout (prefers bundled character art, copies to themes folder)."""
-    os.makedirs(THEMES_DIR, exist_ok=True)
-    for cand in (
-        _BUNDLED_TETO_ASSET,
-        os.path.join(APP_DIR, "_internal", "songpulse", "assets", "teto_sidebar.png"),
-        os.path.join(APP_DIR, "songpulse", "assets", "teto_sidebar.png"),
-    ):
-        if os.path.isfile(cand):
-            try:
-                if (not os.path.isfile(TETO_SIDEBAR_IMG)) or (
-                    os.path.getsize(TETO_SIDEBAR_IMG) != os.path.getsize(cand)
-                ):
-                    shutil.copy2(cand, TETO_SIDEBAR_IMG)
-            except OSError:
-                return cand
-            return TETO_SIDEBAR_IMG
-    if os.path.isfile(TETO_SIDEBAR_IMG):
-        return TETO_SIDEBAR_IMG
-    return ""
-
-
-def _ensure_bundled_theme_art(dest_path: str, bundled_path: str, filename: str) -> str:
-    """Resolves a bundled character art image and syncs it into THEMES_DIR."""
-    os.makedirs(THEMES_DIR, exist_ok=True)
-    for cand in (
-        bundled_path,
-        os.path.join(APP_DIR, "_internal", "songpulse", "assets", filename),
-        os.path.join(APP_DIR, "songpulse", "assets", filename),
-    ):
-        if os.path.isfile(cand):
-            try:
-                if (not os.path.isfile(dest_path)) or (
-                    os.path.getsize(dest_path) != os.path.getsize(cand)
-                ):
-                    shutil.copy2(cand, dest_path)
-            except OSError:
-                return cand
-            return dest_path
-    if os.path.isfile(dest_path):
-        return dest_path
-    return ""
-
-
-def ensure_miku_miniplayer_art() -> str:
-    """Returns Miku miniplayer 1:1 background image."""
-    return _ensure_bundled_theme_art(
-        MIKU_MINI_IMG, _BUNDLED_MIKU_MINI_ASSET, "miku_miniplayer.png"
-    )
-
-
-def ensure_teto_miniplayer_art() -> str:
-    """Returns Teto miniplayer 1:1 background image."""
-    return _ensure_bundled_theme_art(
-        TETO_MINI_IMG, _BUNDLED_TETO_MINI_ASSET, "teto_miniplayer.png"
-    )
+def _bundled_themes_roots() -> list[str]:
+    return [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "themes"),
+        os.path.join(APP_DIR, "_internal", "songpulse", "assets", "themes"),
+        os.path.join(APP_DIR, "songpulse", "assets", "themes"),
+    ]
 
 
 def ensure_theme_template_and_assets():
     os.makedirs(THEMES_DIR, exist_ok=True)
+    os.makedirs(THEME_PHOTOS_DIR, exist_ok=True)
     tmpl_path = os.path.join(THEMES_DIR, TEMPLATE_FILENAME)
     if not os.path.exists(tmpl_path):
         try:
@@ -199,124 +86,146 @@ def ensure_theme_template_and_assets():
                 json.dump(THEME_TEMPLATE, f, indent=2)
         except Exception:
             pass
-    ensure_miku_sidebar_art()
-    ensure_teto_sidebar_art()
-    ensure_miku_miniplayer_art()
-    ensure_teto_miniplayer_art()
+
+    for root in _bundled_themes_roots():
+        if not os.path.isdir(root):
+            continue
+        try:
+            for entry in os.scandir(root):
+                if not entry.is_dir() or entry.name.startswith((".", "_")):
+                    continue
+                dest_dir = os.path.join(THEMES_DIR, entry.name)
+                os.makedirs(dest_dir, exist_ok=True)
+                for f_entry in os.scandir(entry.path):
+                    if not f_entry.is_file():
+                        continue
+                    dest_file = os.path.join(dest_dir, f_entry.name)
+                    try:
+                        if (not os.path.isfile(dest_file)) or (
+                            os.path.getsize(dest_file) != os.path.getsize(f_entry.path)
+                        ):
+                            shutil.copy2(f_entry.path, dest_file)
+                    except OSError:
+                        pass
+        except OSError:
+            pass
 
 
-def get_builtin_miku_theme() -> dict:
-    img = ensure_miku_sidebar_art()
-    mini_img = ensure_miku_miniplayer_art()
-    return {
-        "id": "miku",
-        "name": "Miku",
-        "base_dark": True,
-        "background": {
-            "type": "gradient",
-            "color1": "#061926",
-            "color2": "#0C3E59",
-            "angle": 145,
-            "image": "",
-            "blur": 0,
-            "overlay_alpha": 0,
-        },
-        "sidebar": {
-            "type": "image" if img else "gradient",
-            "color1": "#061C2B",
-            "color2": "#0C485C",
-            "image": img,
-            "fit": "cutout",
-            "blur": 1,
-            "glass_alpha": 42,
-        },
-        "miniplayer": {
-            "type": "image" if mini_img else "gradient",
-            "color1": "#061C2B",
-            "color2": "#0C485C",
-            "angle": 145,
-            "image": mini_img,
-            "fit": "cover",
-            "blur": 1,
-            "overlay_alpha": 52,
-            "glass_alpha": 52,
-        },
-        "colors": {
-            "accent": "#39C5BB",
-            "accent_secondary": "#38BDF8",
-            "card_bg": "rgba(9, 29, 44, 0.72)",
-            "card_border": "rgba(57, 197, 187, 0.30)",
-            "text": "#F0FDFA",
-            "muted": "#99D6DC",
-        },
-        "waveform": {
-            "style": "pulse_line",
-            "mirror": True,
-            "idle_dots": True,
-            "flip_hz": True,
-            "hair_ties": True,
-            "color1": "#39C5BB",
-            "color2": "#38BDF8",
-        },
-    }
+def resolve_theme_image_path(image_path: str, base_dir: str = "") -> str:
+    """Resolves a theme image path (relative to template dir, THEMES_DIR, THEME_PHOTOS_DIR, or absolute)."""
+    raw = str(image_path or "").strip()
+    if not raw:
+        return ""
+    if os.path.isabs(raw):
+        if os.path.isfile(raw):
+            return os.path.normpath(raw)
+        in_photos = os.path.join(THEME_PHOTOS_DIR, os.path.basename(raw))
+        if os.path.isfile(in_photos):
+            return os.path.normpath(in_photos)
+        return ""
+
+    candidates = []
+    if base_dir:
+        candidates.append(os.path.join(base_dir, raw))
+    candidates.append(os.path.join(THEMES_DIR, raw))
+    candidates.append(os.path.join(THEME_PHOTOS_DIR, os.path.basename(raw)))
+    for cand in candidates:
+        if os.path.isfile(cand):
+            return os.path.normpath(cand)
+    return ""
 
 
-def get_builtin_teto_theme() -> dict:
-    img = ensure_teto_sidebar_art()
-    mini_img = ensure_teto_miniplayer_art()
-    return {
-        "id": "teto",
-        "name": "Teto",
-        "base_dark": True,
-        "background": {
-            "type": "gradient",
-            "color1": "#1D070F",
-            "color2": "#4A1224",
-            "angle": 145,
-            "image": "",
-            "blur": 0,
-            "overlay_alpha": 0,
-        },
-        "sidebar": {
-            "type": "image" if img else "gradient",
-            "color1": "#1A060D",
-            "color2": "#3B0E1D",
-            "image": img,
-            "fit": "cutout",
-            "blur": 1,
-            "glass_alpha": 42,
-        },
-        "miniplayer": {
-            "type": "image" if mini_img else "gradient",
-            "color1": "#1A060D",
-            "color2": "#3B0E1D",
-            "angle": 145,
-            "image": mini_img,
-            "fit": "cover",
-            "blur": 1,
-            "overlay_alpha": 52,
-            "glass_alpha": 52,
-        },
-        "colors": {
-            "accent": "#E11D48",
-            "accent_secondary": "#FB7185",
-            "card_bg": "rgba(34, 10, 19, 0.72)",
-            "card_border": "rgba(244, 63, 94, 0.30)",
-            "text": "#FFF5F7",
-            "muted": "#E2AAB8",
-        },
-        "waveform": {
-            "style": "horizontal",
-            "mirror": True,
-            "idle_dots": True,
-            "flip_hz": False,
-            "hair_ties": False,
-            "right_alt_white": True,
-            "teto_bow": True,
-            "color1": "#E11D48",
-            "color2": "#FB7185",
-        },
-    }
+def import_theme_photo(source_path: str) -> str:
+    """Copies an external image into THEME_PHOTOS_DIR with a content-hashed filename and returns 'photos/<name>'."""
+    raw = str(source_path or "").strip()
+    if not raw:
+        return ""
+    os.makedirs(THEME_PHOTOS_DIR, exist_ok=True)
+
+    resolved = resolve_theme_image_path(raw)
+    src = resolved if resolved else raw
+    if not os.path.isfile(src):
+        return raw
+
+    photos_abs = os.path.normcase(os.path.abspath(THEME_PHOTOS_DIR))
+    src_abs = os.path.normcase(os.path.abspath(src))
+    if os.path.dirname(src_abs) == photos_abs:
+        return f"photos/{os.path.basename(src)}"
+
+    stem, ext = os.path.splitext(os.path.basename(src))
+    safe_stem = re.sub(r"[^a-zA-Z0-9_-]+", "_", stem).strip("_") or "photo"
+    ext = ext.lower() if ext else ".png"
+
+    h = hashlib.sha256()
+    try:
+        with open(src, "rb") as f:
+            while True:
+                chunk = f.read(65536)
+                if not chunk:
+                    break
+                h.update(chunk)
+        digest = h.hexdigest()[:12]
+    except OSError:
+        digest = hashlib.sha256(src.encode("utf-8", errors="ignore")).hexdigest()[:12]
+
+    dest_name = f"{safe_stem}_{digest}{ext}"
+    dest_path = os.path.join(THEME_PHOTOS_DIR, dest_name)
+    if not os.path.isfile(dest_path):
+        shutil.copy2(src, dest_path)
+    return f"photos/{dest_name}"
+
+
+def _find_template_json(tid: str) -> tuple[str, str]:
+    """Returns (json_path, template_dir) for a standalone template theme folder."""
+    search_dirs = [os.path.join(THEMES_DIR, tid)]
+    for root in _bundled_themes_roots():
+        search_dirs.append(os.path.join(root, tid))
+    for tdir in search_dirs:
+        if not os.path.isdir(tdir):
+            continue
+        for fname in (f"{tid}.json", "theme.json"):
+            cand = os.path.join(tdir, fname)
+            if os.path.isfile(cand):
+                return cand, tdir
+    return "", ""
+
+
+def list_template_themes() -> list[tuple[str, str]]:
+    """Discovers standalone template themes in DATA_DIR/themes/<id>/."""
+    ensure_theme_template_and_assets()
+    found = {}
+    if os.path.isdir(THEMES_DIR):
+        try:
+            for entry in os.scandir(THEMES_DIR):
+                if (
+                    not entry.is_dir()
+                    or entry.name == "photos"
+                    or entry.name.startswith((".", "_"))
+                ):
+                    continue
+                tid = entry.name
+                jpath, _tdir = _find_template_json(tid)
+                if not jpath:
+                    continue
+                disp = tid.replace("_", " ").replace("-", " ").title()
+                try:
+                    with open(jpath, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    if isinstance(data, dict):
+                        disp = str(data.get("display_name") or data.get("name") or disp).strip()
+                except Exception:
+                    pass
+                found[tid] = disp
+        except OSError:
+            pass
+
+    ordered = []
+    for preferred in ("miku", "teto"):
+        if preferred in found:
+            ordered.append((preferred, found.pop(preferred)))
+    for tid in sorted(found, key=lambda k: found[k].lower()):
+        ordered.append((tid, found[tid]))
+    return ordered
 
 
 def list_custom_themes() -> list[tuple[str, str]]:
@@ -350,22 +259,115 @@ def list_all_theme_choices() -> list[tuple[str, str]]:
         ("auto", "Match Windows"),
         ("dark", "Dark"),
         ("light", "Light"),
-        ("miku", "Miku (Blue Gradient + Pulse Line)"),
-        ("teto", "Teto (Crimson Gradient + Split Wave)"),
     ]
+    choices.extend(list_template_themes())
     choices.extend(list_custom_themes())
     return choices
+
+
+def find_theme_name_conflict(name: str, ignore_theme_key: str = "") -> str | None:
+    """Returns a conflicting theme display name if `name` collides with a built-in, template, or custom theme."""
+    ensure_theme_template_and_assets()
+    clean = (name or "").strip()
+    if not clean:
+        return None
+    low = clean.lower()
+    cand_slug = theme_slug(clean)
+
+    for key, label in [("auto", "Match Windows"), ("dark", "Dark"), ("light", "Light")]:
+        if low in (key, label.lower()) or cand_slug == key:
+            return label
+    if low == "_template" or cand_slug == "_template":
+        return "_template"
+
+    for tid, disp in list_template_themes():
+        jpath, _tdir = _find_template_json(tid)
+        t_names = {tid.lower(), disp.lower()}
+        if jpath:
+            try:
+                with open(jpath, "r", encoding="utf-8") as f:
+                    tdata = json.load(f)
+                if isinstance(tdata, dict):
+                    if tdata.get("name"):
+                        t_names.add(str(tdata["name"]).strip().lower())
+                    if tdata.get("display_name"):
+                        t_names.add(str(tdata["display_name"]).strip().lower())
+            except Exception:
+                pass
+        if low in t_names or cand_slug == tid.lower():
+            return disp
+
+    for ckey, cdisp in list_custom_themes():
+        if ignore_theme_key and ckey == ignore_theme_key:
+            continue
+        ctid = ckey.split("custom:", 1)[1].strip()
+        if low == cdisp.lower() or low == ctid.lower() or cand_slug == ctid.lower():
+            return cdisp
+
+    return None
+
+
+def load_raw_custom_theme(theme_key: str) -> dict | None:
+    """Loads the raw JSON dictionary for a saved custom theme (`custom:<id>`)."""
+    if not theme_key or not str(theme_key).startswith("custom:"):
+        return None
+    tid = str(theme_key).split("custom:", 1)[1].strip()
+    path = os.path.join(THEMES_DIR, f"{tid}.json")
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        return raw if isinstance(raw, dict) else None
+    except Exception:
+        return None
+
+
+def _normalize_loaded_theme(raw: dict, theme_id: str, base_dir: str = "") -> dict:
+    merged = json.loads(json.dumps(THEME_TEMPLATE))
+    merged["id"] = theme_id
+    merged["name"] = raw.get("name") or theme_id
+    merged["base_dark"] = bool(raw.get("base_dark", True))
+
+    for sec in ("background", "sidebar", "colors", "waveform"):
+        if isinstance(raw.get(sec), dict):
+            merged[sec].update(raw[sec])
+
+    raw_mini = raw.get("miniplayer")
+    if isinstance(raw_mini, dict):
+        merged["miniplayer"].update(raw_mini)
+        use_main = bool(raw_mini.get("use_main_bg", False))
+    else:
+        use_main = True
+
+    for sec in ("background", "sidebar", "miniplayer"):
+        sec_cfg = merged.get(sec, {})
+        if sec_cfg.get("type") == "image":
+            resolved = resolve_theme_image_path(sec_cfg.get("image", ""), base_dir=base_dir)
+            if resolved:
+                sec_cfg["image"] = resolved
+            else:
+                sec_cfg["image"] = ""
+                sec_cfg["type"] = "gradient"
+        elif sec_cfg.get("image"):
+            resolved = resolve_theme_image_path(sec_cfg.get("image", ""), base_dir=base_dir)
+            sec_cfg["image"] = resolved
+
+    if use_main:
+        bg_copy = json.loads(json.dumps(merged["background"]))
+        bg_copy["use_main_bg"] = True
+        merged["miniplayer"] = bg_copy
+    else:
+        merged["miniplayer"]["use_main_bg"] = False
+
+    merged["waveform"] = resolve_template_waveform(merged)
+    return merged
 
 
 def load_theme_config(theme_key: str, system_dark: bool) -> dict:
     """Resolves any theme key into a complete normalized theme config dictionary."""
     ensure_theme_template_and_assets()
     key = (theme_key or "auto").strip()
-
-    if key == "miku":
-        return get_builtin_miku_theme()
-    if key == "teto":
-        return get_builtin_teto_theme()
 
     if key.startswith("custom:"):
         tid = key.split("custom:", 1)[1].strip()
@@ -375,14 +377,17 @@ def load_theme_config(theme_key: str, system_dark: bool) -> dict:
                 with open(path, "r", encoding="utf-8") as f:
                     raw = json.load(f)
                 if isinstance(raw, dict):
-                    merged = json.loads(json.dumps(THEME_TEMPLATE))
-                    merged["id"] = key
-                    merged["name"] = raw.get("name") or tid
-                    merged["base_dark"] = bool(raw.get("base_dark", True))
-                    for sec in ("background", "sidebar", "colors", "waveform"):
-                        if isinstance(raw.get(sec), dict):
-                            merged[sec].update(raw[sec])
-                    return merged
+                    return _normalize_loaded_theme(raw, key, base_dir=THEMES_DIR)
+            except Exception:
+                pass
+    elif key not in ("auto", "dark", "light"):
+        jpath, tdir = _find_template_json(key)
+        if jpath:
+            try:
+                with open(jpath, "r", encoding="utf-8") as f:
+                    raw = json.load(f)
+                if isinstance(raw, dict):
+                    return _normalize_loaded_theme(raw, key, base_dir=tdir)
             except Exception:
                 pass
 
@@ -394,6 +399,7 @@ def load_theme_config(theme_key: str, system_dark: bool) -> dict:
             "base_dark": True,
             "background": {"type": "solid", "color1": "#111216", "color2": "#111216", "angle": 135, "image": "", "blur": 0, "overlay_alpha": 0},
             "sidebar": {"type": "solid", "color1": "#17181D", "color2": "#17181D", "image": "", "blur": 0, "glass_alpha": 255},
+            "miniplayer": {"use_main_bg": True, "type": "solid", "color1": "#111216", "color2": "#111216", "angle": 135, "image": "", "blur": 0, "overlay_alpha": 0},
             "colors": {
                 "accent": "#2563EB",
                 "accent_secondary": "#8B5CF6",
@@ -410,6 +416,7 @@ def load_theme_config(theme_key: str, system_dark: bool) -> dict:
         "base_dark": False,
         "background": {"type": "solid", "color1": "#E9EDF3", "color2": "#E9EDF3", "angle": 135, "image": "", "blur": 0, "overlay_alpha": 0},
         "sidebar": {"type": "solid", "color1": "#F4F6FA", "color2": "#F4F6FA", "image": "", "blur": 0, "glass_alpha": 255},
+        "miniplayer": {"use_main_bg": True, "type": "solid", "color1": "#E9EDF3", "color2": "#E9EDF3", "angle": 135, "image": "", "blur": 0, "overlay_alpha": 0},
         "colors": {
             "accent": "#2563EB",
             "accent_secondary": "#7C3AED",
@@ -422,15 +429,24 @@ def load_theme_config(theme_key: str, system_dark: bool) -> dict:
     }
 
 
-def save_custom_theme(name: str, data: dict) -> str:
+def save_custom_theme(name: str, data: dict, previous_theme_key: str = "") -> str:
     """Saves a custom theme JSON inside DATA_DIR/themes and returns its theme_key ('custom:<slug>')."""
     ensure_theme_template_and_assets()
-    slug = re.sub(r"[^a-z0-9_-]+", "_", (name or "custom_theme").strip().lower()).strip("_")
-    if not slug or slug == "_template":
-        slug = "custom_theme"
+    slug = theme_slug(name)
     path = os.path.join(THEMES_DIR, f"{slug}.json")
     payload = dict(data)
     payload["name"] = (name or slug).strip()
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
+
+    if previous_theme_key and str(previous_theme_key).startswith("custom:"):
+        old_slug = str(previous_theme_key).split("custom:", 1)[1].strip()
+        if old_slug and old_slug != slug:
+            old_path = os.path.join(THEMES_DIR, f"{old_slug}.json")
+            if os.path.isfile(old_path):
+                try:
+                    os.remove(old_path)
+                except OSError:
+                    pass
+
     return f"custom:{slug}"

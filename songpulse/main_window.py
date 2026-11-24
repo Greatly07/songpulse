@@ -65,6 +65,7 @@ from .config import (
     get_downloaded_ai_models,
     get_model_file_path,
     get_nvidia_gpu_info,
+    get_saved_theme_colors,
     get_storage_breakdown,
     get_text_scale,
     is_ai_engine_installed,
@@ -223,6 +224,7 @@ class SongPulseWindow(QMainWindow):
         self._last_wf_sig = None
         self._last_icon_colors = None
         self._current_theme_cfg = None
+        self._preview_theme_override = None
         self._cached_gpu_info = None
         self._gpu_poll_busy = False
         self.registered_hotkey = None
@@ -1039,17 +1041,22 @@ class SongPulseWindow(QMainWindow):
         theme_row.addStretch()
         self.theme_combo = NoWheelComboBox()
         self.theme_combo.setMinimumWidth(190)
-        self.theme_combo.currentIndexChanged.connect(self._mark_unsaved)
+        self.theme_combo.currentIndexChanged.connect(self._on_theme_combo_changed)
         create_theme_btn = QPushButton("Create Theme")
         create_theme_btn.setObjectName("PlatformBtn")
         create_theme_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         create_theme_btn.clicked.connect(self._open_create_theme_dialog)
+        self.edit_theme_btn = QPushButton("Edit Theme")
+        self.edit_theme_btn.setObjectName("PlatformBtn")
+        self.edit_theme_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.edit_theme_btn.clicked.connect(self._open_edit_theme_dialog)
         themes_dir_btn = QPushButton("Themes Folder")
         themes_dir_btn.setObjectName("PlatformBtn")
         themes_dir_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         themes_dir_btn.clicked.connect(lambda: os.startfile(THEMES_DIR))
         theme_row.addWidget(self.theme_combo)
         theme_row.addWidget(create_theme_btn)
+        theme_row.addWidget(self.edit_theme_btn)
         theme_row.addWidget(themes_dir_btn)
         app_lay.addLayout(theme_row)
 
@@ -1560,9 +1567,10 @@ class SongPulseWindow(QMainWindow):
 
         layout.addStretch(1)
 
-        scroll_h.addStretch(1)
-        scroll_h.addWidget(center_col, 10)
-        scroll_h.addStretch(1)
+        scroll_h.setSpacing(0)
+        scroll_h.addStretch(0)
+        scroll_h.addWidget(center_col, 1)
+        scroll_h.addStretch(0)
 
         self.settings_scroll = _make_clean_scroll(scroll_inner, horizontal_off=True)
         page_lay.addWidget(self.settings_scroll, 1)
@@ -1570,12 +1578,14 @@ class SongPulseWindow(QMainWindow):
         # Sticky footer bar: Discard Changes + Save Settings
         footer_wrap = QWidget()
         footer_outer = QHBoxLayout(footer_wrap)
-        footer_outer.setContentsMargins(22, 8, 22, 14)
+        footer_outer.setContentsMargins(22, 8, 30, 14)
+        footer_outer.setSpacing(0)
 
         footer_inner = QWidget()
         footer_inner.setMaximumWidth(920)
+        footer_inner.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         footer = QHBoxLayout(footer_inner)
-        footer.setContentsMargins(0, 0, 0, 0)
+        footer.setContentsMargins(10, 0, 10, 0)
 
         self.discard_changes_btn = QPushButton("Discard Changes")
         self.discard_changes_btn.setObjectName("DangerBtn")
@@ -1592,9 +1602,9 @@ class SongPulseWindow(QMainWindow):
         footer.addStretch()
         footer.addWidget(save_btn)
 
-        footer_outer.addStretch(1)
-        footer_outer.addWidget(footer_inner, 10)
-        footer_outer.addStretch(1)
+        footer_outer.addStretch(0)
+        footer_outer.addWidget(footer_inner, 1)
+        footer_outer.addStretch(0)
         page_lay.addWidget(footer_wrap)
 
         self._populate_settings_ui()
@@ -1633,6 +1643,18 @@ class SongPulseWindow(QMainWindow):
         n_dl = len(get_downloaded_ai_models())
         self.ai_collapse_btn.setText(f"{arrow}  AI Models (Tricky Tracks)  •  {n_dl} downloaded")
 
+    def _sync_edit_theme_btn(self):
+        if not hasattr(self, "edit_theme_btn") or not hasattr(self, "theme_combo"):
+            return
+        cur_key = str(self.theme_combo.currentData() or "")
+        is_custom = cur_key.startswith("custom:")
+        self.edit_theme_btn.setEnabled(is_custom)
+        self.edit_theme_btn.setToolTip(
+            "Edit this saved custom theme"
+            if is_custom
+            else "Select a custom theme to edit it"
+        )
+
     def _refresh_theme_dropdown(self, select_key: str):
         self.theme_combo.blockSignals(True)
         self.theme_combo.clear()
@@ -1644,12 +1666,107 @@ class SongPulseWindow(QMainWindow):
                 target_idx = idx
         self.theme_combo.setCurrentIndex(target_idx)
         self.theme_combo.blockSignals(False)
+        self._sync_edit_theme_btn()
+
+    def _sync_saved_theme_colors(self):
+        saved_cols = get_saved_theme_colors()
+        self.settings["saved_theme_colors"] = saved_cols
+        self._saved_settings_snapshot["saved_theme_colors"] = list(saved_cols)
+
+    def _on_theme_combo_changed(self, *_args):
+        if getattr(self, "_suppress_unsaved", False):
+            return
+        if hasattr(self, "wf_style_combo") and self.wf_style_combo.currentIndex() == 0:
+            self._sync_theme_waveform_checkboxes(self.theme_combo.currentData() or "auto")
+        self._mark_unsaved()
+
+    def _sync_theme_waveform_checkboxes(self, theme_key: str):
+        if self.settings.get("waveform_style", "auto") != "auto":
+            return
+        cfg = load_theme_config(theme_key, is_windows_dark_mode())
+        wf = cfg.get("waveform", {})
+        mirror = bool(wf.get("mirror", False))
+        idle_dots = bool(wf.get("idle_dots", False))
+        self.settings["waveform_mirror"] = mirror
+        self.settings["waveform_idle_dots"] = idle_dots
+        if hasattr(self, "wf_mirror_chk"):
+            self.wf_mirror_chk.blockSignals(True)
+            self.wf_mirror_chk.setChecked(mirror)
+            self.wf_mirror_chk.blockSignals(False)
+        if hasattr(self, "wf_idle_dots_chk"):
+            self.wf_idle_dots_chk.blockSignals(True)
+            self.wf_idle_dots_chk.setChecked(idle_dots)
+            self.wf_idle_dots_chk.blockSignals(False)
+
+    def _apply_and_save_custom_theme(self, theme_key: str):
+        cfg = load_theme_config(theme_key, is_windows_dark_mode())
+        wf = cfg.get("waveform", {})
+        mirror = bool(wf.get("mirror", False))
+        idle_dots = bool(wf.get("idle_dots", False))
+
+        self._suppress_unsaved = True
+        try:
+            self._refresh_theme_dropdown(theme_key)
+            if hasattr(self, "wf_style_combo"):
+                self.wf_style_combo.setCurrentIndex(0)
+            if hasattr(self, "wf_mirror_chk"):
+                self.wf_mirror_chk.setChecked(mirror)
+            if hasattr(self, "wf_idle_dots_chk"):
+                self.wf_idle_dots_chk.setChecked(idle_dots)
+        finally:
+            self._suppress_unsaved = False
+
+        self.settings["theme"] = theme_key
+        self.settings["waveform_style"] = "auto"
+        self.settings["waveform_mirror"] = mirror
+        self.settings["waveform_idle_dots"] = idle_dots
+
+        self._saved_settings_snapshot["theme"] = theme_key
+        self._saved_settings_snapshot["waveform_style"] = "auto"
+        self._saved_settings_snapshot["waveform_mirror"] = mirror
+        self._saved_settings_snapshot["waveform_idle_dots"] = idle_dots
+        save_settings(self._saved_settings_snapshot)
+
+        self.apply_theme(force=True)
+        self._refresh_storage_summary()
+
+        if (
+            self.settings == self._saved_settings_snapshot
+            and self.startup_chk.isChecked() == self._saved_startup_snapshot
+        ):
+            self.has_unsaved_settings = False
+            self.discard_changes_btn.hide()
+            self.unsaved_lbl.setText("Theme saved & applied!")
+            QTimer.singleShot(
+                2000,
+                lambda: self.unsaved_lbl.setText("") if not self.has_unsaved_settings else None,
+            )
 
     def _open_create_theme_dialog(self):
-        dlg = CustomThemeDialog(parent=self)
-        if dlg.exec() and dlg.created_theme_key:
-            self._refresh_theme_dropdown(dlg.created_theme_key)
-            self._mark_unsaved()
+        dlg = CustomThemeDialog(
+            parent=self,
+            on_preview=self.preview_theme_config,
+            on_stop_preview=self.stop_theme_preview,
+        )
+        accepted = dlg.exec()
+        self._sync_saved_theme_colors()
+        if accepted and dlg.created_theme_key:
+            self._apply_and_save_custom_theme(dlg.created_theme_key)
+
+    def _open_edit_theme_dialog(self):
+        cur_key = str(self.theme_combo.currentData() or "")
+        if not cur_key.startswith("custom:"):
+            return
+        dlg = CustomThemeDialog(
+            parent=self,
+            edit_theme_key=cur_key,
+            on_preview=self.preview_theme_config,
+            on_stop_preview=self.stop_theme_preview,
+        )
+        accepted = dlg.exec()
+        self._sync_saved_theme_colors()
+        if accepted and dlg.created_theme_key:
+            self._apply_and_save_custom_theme(dlg.created_theme_key)
 
     def _on_wf_maxw_slider_changed(self, val: int):
         self.wf_maxw_spin.blockSignals(True)
@@ -1800,6 +1917,7 @@ class SongPulseWindow(QMainWindow):
         old_buf_en = bool(self.settings.get("enable_audio_buffer", True))
 
         self.settings["theme"] = self.theme_combo.currentData() or "auto"
+        self._sync_edit_theme_btn()
         self.settings["icon_color"] = self.icon_color_combo.currentData() or "theme"
         self.settings["text_size"] = self.text_size_combo.currentData() or "small"
         wf_styles = ["auto", "radial", "horizontal", "pulse_line", "bar", "dots"]
@@ -2272,6 +2390,8 @@ class SongPulseWindow(QMainWindow):
             return
         info = get_storage_breakdown(self.history)
         parts = [f"{len(info['models'])} AI model(s)", f"{len(info['all_cover_files'])} cover(s)"]
+        if info.get("all_theme_photo_files"):
+            parts.append(f"{len(info['all_theme_photo_files'])} theme photo(s)")
         if info["temp_bytes"] > 0:
             parts.append(f"{format_bytes(info['temp_bytes'])} temp")
         if info["ai_runtime_bytes"] > 0:
@@ -2649,36 +2769,54 @@ class SongPulseWindow(QMainWindow):
             os._exit(0)
 
     # --- THEME & CUSTOM WAVEFORM ---
+    def preview_theme_config(self, cfg: dict):
+        self._preview_theme_override = copy.deepcopy(cfg) if cfg else None
+        self.apply_theme(force=True)
+
+    def stop_theme_preview(self):
+        if self._preview_theme_override is not None:
+            self._preview_theme_override = None
+            self.apply_theme(force=True)
+
     def apply_theme(self, force: bool = False):
-        theme_key = self.settings.get("theme", "auto")
-        sys_dark = is_windows_dark_mode()
-        cfg = load_theme_config(theme_key, sys_dark)
+        if self._preview_theme_override is not None:
+            cfg = self._preview_theme_override
+            theme_key = cfg.get("id", "custom:__preview__")
+        else:
+            theme_key = self.settings.get("theme", "auto")
+            sys_dark = is_windows_dark_mode()
+            cfg = load_theme_config(theme_key, sys_dark)
         dark = bool(cfg.get("base_dark", True))
 
         wf_pref = self.settings.get("waveform_style", "auto")
         wf_theme = cfg.get("waveform", {})
-        eff_style = wf_theme.get("style", "radial") if wf_pref == "auto" else wf_pref
-        eff_mirror = (
-            bool(wf_theme.get("mirror", False))
-            if wf_pref == "auto" and not self.settings.get("waveform_mirror", False)
-            else bool(self.settings.get("waveform_mirror", False))
-        )
-        eff_idle_dots = (
-            bool(wf_theme.get("idle_dots", False))
-            if wf_pref == "auto" and not self.settings.get("waveform_idle_dots", False)
-            else bool(self.settings.get("waveform_idle_dots", False))
-        )
+        if self._preview_theme_override is not None:
+            eff_style = wf_theme.get("style", "radial")
+            eff_mirror = bool(wf_theme.get("mirror", False))
+            eff_idle_dots = bool(wf_theme.get("idle_dots", False))
+            eff_flip_hz = bool(wf_theme.get("flip_hz", eff_mirror))
+        else:
+            eff_style = wf_theme.get("style", "radial") if wf_pref == "auto" else wf_pref
+            eff_mirror = bool(self.settings.get("waveform_mirror", False))
+            eff_idle_dots = bool(self.settings.get("waveform_idle_dots", False))
+            if wf_theme.get("teto_bow") and "flip_hz" in wf_theme:
+                eff_flip_hz = bool(wf_theme.get("flip_hz", False))
+            else:
+                eff_flip_hz = bool(eff_mirror)
         eff_max_w = int(self.settings.get("waveform_max_width", 620))
         eff_step = float(self.settings.get("waveform_step", 0.0) or 0.0)
         icon_pref = self.settings.get("icon_color", "theme")
         font_scale = get_text_scale(self.settings.get("text_size", "small"))
 
         # Separate visual stylesheet signature from lightweight waveform & icon signatures
+        import json as _json
+        cfg_digest = hashlib.md5(
+            _json.dumps(cfg, sort_keys=True, default=str).encode("utf-8", errors="ignore")
+        ).hexdigest()
         theme_sig = (
             theme_key,
             dark,
-            cfg.get("background", {}).get("image", ""),
-            cfg.get("sidebar", {}).get("image", ""),
+            cfg_digest,
             font_scale,
         )
         wf_sig = (
@@ -2689,7 +2827,7 @@ class SongPulseWindow(QMainWindow):
             eff_step,
             wf_theme.get("color1", cfg.get("colors", {}).get("accent", "#3B82F6")),
             wf_theme.get("color2", cfg.get("colors", {}).get("accent_secondary", "#8B5CF6")),
-            bool(wf_theme.get("flip_hz", False)),
+            eff_flip_hz,
             bool(wf_theme.get("hair_ties", False)),
             bool(wf_theme.get("right_alt_white", False)),
             bool(wf_theme.get("teto_bow", False)),
@@ -2752,7 +2890,7 @@ class SongPulseWindow(QMainWindow):
                 max_width=eff_max_w,
                 color1=wf_theme.get("color1", cfg.get("colors", {}).get("accent", "#3B82F6")),
                 color2=wf_theme.get("color2", cfg.get("colors", {}).get("accent_secondary", "#8B5CF6")),
-                flip_hz=bool(wf_theme.get("flip_hz", False)),
+                flip_hz=eff_flip_hz,
                 hair_ties=bool(wf_theme.get("hair_ties", False)),
                 right_alt_white=bool(wf_theme.get("right_alt_white", False)),
                 teto_bow=bool(wf_theme.get("teto_bow", False)),
@@ -2767,7 +2905,7 @@ class SongPulseWindow(QMainWindow):
                 "max_width": eff_max_w,
                 "color1": wf_theme.get("color1", cfg.get("colors", {}).get("accent", "#3B82F6")),
                 "color2": wf_theme.get("color2", cfg.get("colors", {}).get("accent_secondary", "#8B5CF6")),
-                "flip_hz": bool(wf_theme.get("flip_hz", False)),
+                "flip_hz": eff_flip_hz,
                 "hair_ties": bool(wf_theme.get("hair_ties", False)),
                 "right_alt_white": bool(wf_theme.get("right_alt_white", False)),
                 "teto_bow": bool(wf_theme.get("teto_bow", False)),
