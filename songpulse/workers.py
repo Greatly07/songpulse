@@ -1787,6 +1787,7 @@ class ArtistInfoWorker(QThread):
             "image_bytes": b"",
             "top_tracks": [],
             "albums": [],
+            "sources": [],
         }
 
         q = urllib.parse.quote_plus(self.artist_name)
@@ -1808,6 +1809,8 @@ class ArtistInfoWorker(QThread):
                 matching_it[0] if matching_it else None,
             )
             if hit:
+                if "iTunes" not in info["sources"]:
+                    info["sources"].append("iTunes")
                 info["name"] = hit.get("artistName") or info["name"]
                 if hit.get("primaryGenreName"):
                     info["genre"] = hit["primaryGenreName"]
@@ -1876,6 +1879,8 @@ class ArtistInfoWorker(QThread):
             )
 
             if best:
+                if "Deezer" not in info["sources"]:
+                    info["sources"].append("Deezer")
                 aid = best.get("id")
                 info["name"] = best.get("name") or info["name"]
                 info["fans"] = int(best.get("nb_fan") or 0)
@@ -1950,6 +1955,8 @@ class ArtistInfoWorker(QThread):
                     cut = extract[:340].rfind(".")
                     extract = extract[: cut + 1] if cut > 120 else extract[:337].rstrip() + "..."
                 info["bio"] = extract
+                if "Wikipedia" not in info["sources"]:
+                    info["sources"].append("Wikipedia")
         except Exception:
             pass
 
@@ -1986,6 +1993,7 @@ class AlbumInfoWorker(QThread):
             "copyright": "",
             "image_bytes": b"",
             "tracks": [],
+            "sources": [],
         }
 
         q = urllib.parse.quote_plus(query_txt)
@@ -1997,6 +2005,8 @@ class AlbumInfoWorker(QThread):
             )
             results = it.get("results") or []
             if results:
+                if "iTunes" not in info["sources"]:
+                    info["sources"].append("iTunes")
                 alb_low = self.album_name.lower()
                 hit = next(
                     (r for r in results if alb_low in (r.get("collectionName") or "").lower()),
@@ -2048,6 +2058,8 @@ class AlbumInfoWorker(QThread):
                 dz = _http_get_json(f"https://api.deezer.com/search/album?q={q}&limit=5", timeout=6)
                 hits = dz.get("data") or []
                 if hits:
+                    if "Deezer" not in info["sources"]:
+                        info["sources"].append("Deezer")
                     hit = hits[0]
                     aid = hit.get("id")
                     if not info["image_bytes"]:

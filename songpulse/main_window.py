@@ -235,7 +235,7 @@ class SongPulseWindow(QMainWindow):
 
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(self.app_icon)
-        self.setMinimumSize(540, 480)
+        self.setMinimumSize(464, 480)
         if self.settings.get("save_window_size", True):
             self.resize(
                 int(self.settings.get("window_width", 920)),

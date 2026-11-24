@@ -50,6 +50,7 @@ except Exception:
 from .config import TEMP_DIR, build_site_url, find_default_ytdlp_app, open_external_url, split_artists
 from .dialogs import prompt_install_or_locate_ytdlp
 from .theme import (
+    apply_font_scale_to_widget_tree,
     create_ui_icon,
     create_ytdlp_icon,
     extract_cover_gradient_colors,
@@ -927,12 +928,16 @@ class SongDetailPage(QWidget):
         card_lay.setSpacing(10)
 
         top = QHBoxLayout()
+        top.setSpacing(8)
         self.popup_kicker = QLabel("ARTIST")
+        self.popup_source_lbl = QLabel("")
+        self.popup_source_lbl.hide()
         self.popup_close_btn = QPushButton("✕")
         self.popup_close_btn.setFixedSize(26, 26)
         self.popup_close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.popup_close_btn.clicked.connect(self._close_info_popup)
         top.addWidget(self.popup_kicker)
+        top.addWidget(self.popup_source_lbl)
         top.addStretch()
         top.addWidget(self.popup_close_btn)
         card_lay.addLayout(top)
@@ -1077,13 +1082,20 @@ class SongDetailPage(QWidget):
             f"border-radius: 7px; padding: 4px 10px; font-size: 11px; font-weight: 600; }}"
             f"QPushButton:hover {{ background-color: {btn_hover}; border-color: {ac}; }}"
         )
+        self.popup_close_btn.setProperty("_base_qss", None)
         self.popup_close_btn.setStyleSheet(
             f"QPushButton {{ background-color: {btn_bg}; color: {muted}; border: 1px solid {btn_b}; "
             f"border-radius: 7px; padding: 0px; font-size: 12px; font-weight: 700; }}"
             f"QPushButton:hover {{ color: #F87171; border-color: #F87171; }}"
         )
+        self.popup_kicker.setProperty("_base_qss", None)
         self.popup_kicker.setStyleSheet(
             f"color: {link_fg}; font-size: 11px; font-weight: 700; border: none; background: transparent;"
+        )
+        self.popup_source_lbl.setProperty("_base_qss", None)
+        self.popup_source_lbl.setStyleSheet(
+            f"background-color: {btn_bg}; color: {muted}; border: 1px solid {panel_b}; "
+            f"border-radius: 6px; padding: 2px 7px; font-size: 10px; font-weight: 600;"
         )
 
         self.ytdlp_btn.setStyleSheet(
@@ -1118,6 +1130,11 @@ class SongDetailPage(QWidget):
         self._artist_chip_qss = (
             f"QPushButton {{ background-color: {chip_bg}; color: {link_fg}; border: 1px solid {chip_b}; "
             f"border-radius: 11px; padding: 3px 10px; font-size: 12px; font-weight: 600; }}"
+            f"QPushButton:hover {{ background-color: {chip_hover}; border-color: {link_fg}; }}"
+        )
+        self._popup_play_btn_qss = (
+            f"QPushButton {{ background-color: {chip_bg}; border: 1px solid {chip_b}; "
+            f"border-radius: 12px; padding: 0px; }}"
             f"QPushButton:hover {{ background-color: {chip_hover}; border-color: {link_fg}; }}"
         )
         self._album_link_qss = (
@@ -1393,13 +1410,33 @@ class SongDetailPage(QWidget):
         self.info_worker.error.connect(self._on_popup_error)
         self.info_worker.start()
 
+    def _apply_popup_font_scale(self):
+        scale = float(getattr(self.window(), "_active_font_scale", 1.0) or 1.0)
+        if abs(scale - 1.0) >= 0.01:
+            apply_font_scale_to_widget_tree(self.info_backdrop, scale)
+
+    def _make_popup_play_btn(self, preview_url: str, title: str) -> QPushButton:
+        pbtn = QPushButton()
+        pbtn.setFixedSize(24, 24)
+        pbtn.setCursor(Qt.CursorShape.PointingHandCursor)
+        pbtn.setIcon(_make_play_icon(False, self._link_hex, 12))
+        pbtn.setIconSize(QSize(12, 12))
+        pbtn.setStyleSheet(self._popup_play_btn_qss)
+        pbtn.setToolTip(f"Play preview: {title}" if title else "Play preview")
+        pbtn.clicked.connect(
+            lambda checked=False, u=preview_url, tn=title: self._play_custom_preview(u, tn)
+        )
+        return pbtn
+
     def _show_popup_loading(self, text: str):
         self._clear_popup_body()
+        self.popup_source_lbl.hide()
         lbl = QLabel(text)
         lbl.setStyleSheet(
             f"color: {self._muted_hex}; font-size: 12px; border: none; background: transparent;"
         )
         self.popup_body_lay.addWidget(lbl)
+        self._apply_popup_font_scale()
         self.info_backdrop.setGeometry(self.rect())
         self.info_backdrop.sync_card_size()
         self.info_backdrop.raise_()
@@ -1407,12 +1444,14 @@ class SongDetailPage(QWidget):
 
     def _on_popup_error(self, err: str):
         self._clear_popup_body()
+        self.popup_source_lbl.hide()
         lbl = QLabel(f"Could not load details: {err}")
         lbl.setWordWrap(True)
         lbl.setStyleSheet(
             f"color: {self._muted_hex}; font-size: 12px; border: none; background: transparent;"
         )
         self.popup_body_lay.addWidget(lbl)
+        self._apply_popup_font_scale()
 
     def _on_popup_loaded(self, data: dict):
         self._active_info_data = data
@@ -1425,6 +1464,12 @@ class SongDetailPage(QWidget):
         self._clear_popup_body()
         kind = data.get("kind")
         url = self._active_info_url or data.get("url", "")
+        sources = data.get("sources") or []
+        if sources:
+            self.popup_source_lbl.setText(f"Source: {' • '.join(sources)}")
+            self.popup_source_lbl.show()
+        else:
+            self.popup_source_lbl.hide()
 
         head = QHBoxLayout()
         head.setSpacing(14)
@@ -1491,7 +1536,7 @@ class SongDetailPage(QWidget):
             cp_lbl.setWordWrap(True)
             cp_lbl.setMinimumWidth(0)
             cp_lbl.setStyleSheet(
-                f"color: {self._muted_hex}; font-size: 11px; border: none; background: transparent;"
+                f"color: {self._muted_hex}; font-size: 12px; border: none; background: transparent;"
             )
             meta_col.addWidget(cp_lbl)
 
@@ -1537,14 +1582,7 @@ class SongDetailPage(QWidget):
                     r_lay.addWidget(t_lbl, 1)
                     r_lay.addWidget(d_lbl)
                     if tr.get("preview") and HAS_MULTIMEDIA:
-                        pbtn = QPushButton("▶")
-                        pbtn.setFixedSize(24, 22)
-                        pbtn.setCursor(Qt.CursorShape.PointingHandCursor)
-                        pbtn.setStyleSheet(self._artist_chip_qss.replace("padding: 3px 10px;", "padding: 0;"))
-                        pbtn.clicked.connect(
-                            lambda checked=False, u=tr["preview"], tn=tr.get("title", ""): self._play_custom_preview(u, tn)
-                        )
-                        r_lay.addWidget(pbtn)
+                        r_lay.addWidget(self._make_popup_play_btn(tr["preview"], tr.get("title", "")))
                     self.popup_body_lay.addLayout(r_lay)
 
             albums = data.get("albums") or []
@@ -1610,14 +1648,7 @@ class SongDetailPage(QWidget):
                     r_lay.addWidget(d_lbl)
 
                     if tr.get("preview_url") and HAS_MULTIMEDIA:
-                        pbtn = QPushButton("▶")
-                        pbtn.setFixedSize(24, 22)
-                        pbtn.setCursor(Qt.CursorShape.PointingHandCursor)
-                        pbtn.setStyleSheet(self._artist_chip_qss.replace("padding: 3px 10px;", "padding: 0;"))
-                        pbtn.clicked.connect(
-                            lambda checked=False, u=tr["preview_url"], tn=tr.get("title", ""): self._play_custom_preview(u, tn)
-                        )
-                        r_lay.addWidget(pbtn)
+                        r_lay.addWidget(self._make_popup_play_btn(tr["preview_url"], tr.get("title", "")))
                     self.popup_body_lay.addWidget(row_frame)
             else:
                 no_tr = QLabel("No tracklist available.")
@@ -1625,6 +1656,8 @@ class SongDetailPage(QWidget):
                     f"color: {self._muted_hex}; font-size: 12px; border: none; background: transparent;"
                 )
                 self.popup_body_lay.addWidget(no_tr)
+
+        self._apply_popup_font_scale()
 
     def _open_full_web_player(self):
         if not self.song:
