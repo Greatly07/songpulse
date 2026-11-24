@@ -2,21 +2,27 @@
 
 A lightweight Windows desktop music identifier that listens directly to your PC's system audio, even while wearing headphones or using multiple audio outputs, with optional local AI rescue for tricky tracks.
 
-<img width="720" alt="Identify Tab" src="https://github.com/user-attachments/assets/de12b4a4-edab-47f2-b3e3-90903ec7d822" />
+<img width="620" alt="Identify Tab" src="assets/Identify_Default.png" />
 
 ---
 
 ## Features (v1.2.0)
 
 - **Multi-Output Desktop Audio Capture:** Listens directly to one or more Windows playback devices simultaneously via WASAPI loopback without needing a microphone or virtual audio cables. Includes an option to disable the rolling RAM buffer when you only want Listen Live.
+
+  <img width="480" alt="Audio Output Options" src="assets/OutputOptions_Default.png" />
 - **Two Listening Modes + Mini Window & Saved Clip Testing:**
   - **Listen (Live):** Continuously monitors playing audio with non-blocking probes and instant cancellation. Also supports your selected local AI rescue model when enabled.
   - **Identify Last (Rolling Buffer):** Keeps the last 5 to 30 seconds of desktop audio in RAM so you can identify a track you just heard immediately, or **Save Last Xs** to test a captured clip against multiple AI models without losing the audio.
   - **Mini Window:** Compact always-on-top mini window with live waveforms, Listen, Identify Last, and AI Rescue toggle.
+
+  <img width="195" alt="Miniplayer Default" src="assets/Miniplayer_Default.png" /> <img width="195" alt="Miniplayer Miku" src="assets/Miniplayer_Miku.png" /> <img width="195" alt="Miniplayer Teto" src="assets/Miniplayer_Teto.png" /> <img width="195" alt="Miniplayer Custom Synthion" src="assets/Miniplayer_CustomSythion.png" />
 - **Optional Tricky-Track Local AI Rescue (Saves Space):**
   - Core SongPulse installs with **no AI engine or models downloaded by default**.
   - Choose from curated tricky-track rescue models in **Settings -> AI Models** (or during Setup): **De-Reverb HQ**, **UVR De-Echo & De-Reverb**, **UVR DeNoise (SFX & Static)**, **UVR Crowd Remover**, **Whisper Lyrics Rescue (Tiny / Base)** for sped-up, slowed+reverb, and covers, **UVR Inst HQ 3**, or import your own custom `.onnx` / `.pth` / `.ckpt` model.
   - Built-in speed/pitch rescue sweep for sped-up and slowed tracks, plus smart GPU load guard with automatic CPU fallback.
+
+  <img width="480" alt="AI Rescue Models" src="assets/AIRescueModels_Default.png" />
 - **Reworked Library, Playlists & yt-dlp Integration:**
   - Switch between **Identified Songs**, **Liked Songs**, and unlimited **Custom Playlists**.
   - Reorder custom playlists manually via drag-and-drop or move arrows, or sort by Date, Title, Artist, Genre, or Album.
@@ -25,25 +31,37 @@ A lightweight Windows desktop music identifier that listens directly to your PC'
   - Right-click any song in the Library to **Like/Unlike**, **Listen in** your preferred music site, **Add to Playlist**, or **Download** via `yt-dlp-downloader`.
   - **Quick MP3 Download (Default ON):** Automatically launches `yt-dlp-downloader` via `ytdlp://` URI with the Music preset (preferring audio-only YouTube Music song links first and falling back to video if unavailable) and closes it automatically once downloads finish.
 
-  <img width="480" alt="History Tab" src="https://github.com/user-attachments/assets/f6aa6dd2-60ef-4520-ac0a-a928f3d085f2" /><img width="480" alt="Liked Tab" src="https://github.com/user-attachments/assets/f32a99be-6440-460e-87a6-f9d51a47ce89" />
+  <img width="600" alt="Library Tab" src="assets/Library_Default.png" />
+  <br>
+  <img width="520" alt="Library Sticky Batch Action Bar" src="assets/LibraryActionBar_Default.png" />
 
 - **Custom Themes, Miku & Teto Themes, and Custom Waveforms:**
   - Built-in **Match Windows**, **Dark**, **Light**, **Miku** (blue gradient, Miku sidebar cutout, diamond hair ties, and stereo Pulse Line waveform), and **Teto** (crimson gradient, Teto sidebar cutout, top-right white bow, and stereo Horizontal Split waveform with alternating red/white right bars).
   
-  <img width="480" alt="Miku Theme" src="https://github.com/user-attachments/assets/af095c3a-b75a-4d4d-b69c-f3d0b1c6ad80" /><img width="480" alt="Teto Theme" src="https://github.com/user-attachments/assets/f8b13dd8-7cf2-481f-ae31-015d7e56c51c" />
+  <img width="420" alt="Miku Theme" src="assets/Identify_Miku.png" /> <img width="420" alt="Teto Theme" src="assets/Identify_Teto.png" />
 
-  - Create custom themes visually in **Settings -> Create Theme** or edit JSON templates in `themes/` with solid colors, gradients, or photos for both the background and sidebar.
+  - Create custom themes visually with a live preview in **Settings -> Create Theme** or edit JSON templates in `custom_themes/` with solid colors, gradients, or photos for the background, sidebar, and mini-player (including an optional **Synthion** preset in `custom_themes/synthion/`).
   - Customize waveform shape (**Radial**, **Horizontal Split**, **Pulse Line**, **Bottom Bar**, **Dots Ring**), mirroring, idle resting dots, and max width.
+
+  <img width="420" alt="Custom Synthion Theme" src="assets/Identify_CustomSynthion.png" /> <img width="420" alt="Custom Theme Editor" src="assets/CustomThemeTemplate_CustomSynthion.png" />
 - **Rich Song Details, In-App Artist/Album Popup & Full Web Player:**
   - Dynamic album-art gradient detail view with responsive wrapped platform buttons, separated clickable artist chips, sticky top action bar, centered in-app Artist and Album info popups (clicking the name/title inside opens on your chosen site from Settings), built-in 30s audio preview, and a lightweight **Full Player** web viewer.
 
-  <img width="720" alt="Detailed View" src="https://github.com/user-attachments/assets/e7fee23c-181d-4fb1-933f-1b3817184380" />
+  <img width="620" alt="Song Detail View" src="assets/Song_Default.png" />
+  <br>
+  <img width="420" alt="Artist Info Popup" src="assets/Artist_Default.png" /> <img width="420" alt="Album Info Popup" src="assets/Album_Default.png" />
 
   - Clicking either the themed bottom-right popup or a native Windows toast notification focuses SongPulse directly on that song's detailed view and closes the notification.
+
+  <img width="230" alt="Listening Live Popup" src="assets/ListeningLive_Default.png" /> <img width="300" alt="Identified Song Popup" src="assets/IdentifiedSong_Default.png" />
   - Quick links to Shazam, YouTube, YouTube Music, Spotify, Apple Music, SoundCloud, Deezer, Amazon Music, and Tidal, plus one-click **Copy Link** and **Download with yt-dlp** integration (with automatic setup prompt if not installed).
 - **Storage Clean-Up & Direct Self-Updater:**
   - Selectively free disk space in **Settings -> Storage & Clean-Up** (temp files, logs, unused or all covers, individual AI models, optional AI engine, or history).
   - Direct in-app **Update Now** in **Settings -> Updates**, plus automatic Visual C++ x64 Runtime check during Setup for fresh PCs.
+
+  <img width="480" alt="Storage Clean-Up Summary" src="assets/Cleanup1_Default.png" />
+  <br>
+  <img width="360" alt="Storage Clean-Up Dialog" src="assets/Cleanup2_Default.png" />
 
 ---
 
@@ -92,3 +110,9 @@ A lightweight Windows desktop music identifier that listens directly to your PC'
    ```bash
    python songpulse_app.pyw
    ```
+
+---
+
+## Disclaimer
+
+SongPulse is an independent open-source project and is **not affiliated with, endorsed by, or sponsored by** Crypton Future Media, Inc. (Hatsune Miku), TWINDRILL (Kasane Teto), Synthion, `yt-dlp`, Shazam, Apple/iTunes, YouTube, Spotify, SoundCloud, Deezer, Amazon Music, Tidal, LRCLIB, Ultimate Vocal Remover (UVR), or OpenAI (Whisper). All trademarks, character designs, artwork, and brand names belong to their respective owners.
