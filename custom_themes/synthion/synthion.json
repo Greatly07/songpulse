@@ -1,0 +1,50 @@
+{
+  "name": "Synthion",
+  "base_dark": true,
+  "background": {
+    "type": "image",
+    "color1": "#313078",
+    "color2": "#61657c",
+    "image": "photos/aquamarine_crop_5df3e94265be.png",
+    "blur": 2,
+    "darken_black": true,
+    "angle": 135,
+    "overlay_alpha": 120
+  },
+  "sidebar": {
+    "type": "image",
+    "color1": "#313078",
+    "color2": "#61657c",
+    "image": "photos/Synthion3_0Full_2340905814b9.webp",
+    "blur": 1,
+    "darken_black": true,
+    "glass_alpha": 144
+  },
+  "miniplayer": {
+    "type": "image",
+    "color1": "#313078",
+    "color2": "#61657c",
+    "image": "photos/aquamarine_crop_5df3e94265be.png",
+    "blur": 2,
+    "darken_black": true,
+    "angle": 135,
+    "overlay_alpha": 120,
+    "use_main_bg": true
+  },
+  "colors": {
+    "accent": "#938fc7",
+    "accent_secondary": "#a0a4bc",
+    "card_bg": "rgba(15, 24, 38, 0.72)",
+    "card_border": "rgba(255, 255, 255, 0.16)",
+    "text": "#F4F8FF",
+    "muted": "#9BB6CC"
+  },
+  "waveform": {
+    "style": "horizontal",
+    "mirror": true,
+    "idle_dots": true,
+    "color1": "#938fc7",
+    "color2": "#a0a4bc",
+    "flip_hz": true
+  }
+}
