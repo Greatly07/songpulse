@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -1738,6 +1739,26 @@ def resolve_ytdlp_download_url(song: dict) -> tuple[str, dict]:
     return fallback, updates
 
 
+def _normalize_artist_name(name: str) -> str:
+    """Fold diacritics and strip punctuation/whitespace for strict artist name matching."""
+    text = unicodedata.normalize("NFKD", (name or "").strip())
+    ascii_folded = "".join(ch for ch in text if not unicodedata.combining(ch)).casefold()
+    return re.sub(r"[^\w]", "", ascii_folded)
+
+
+def _artist_names_match(a: str, b: str) -> bool:
+    """Return True if two artist names match (case/diacritic/punctuation-insensitive)."""
+    a_clean = (a or "").strip().casefold()
+    b_clean = (b or "").strip().casefold()
+    if not a_clean or not b_clean:
+        return False
+    if a_clean == b_clean:
+        return True
+    a_norm = _normalize_artist_name(a)
+    b_norm = _normalize_artist_name(b)
+    return bool(a_norm and a_norm == b_norm)
+
+
 class ArtistInfoWorker(QThread):
     """Fetches rich in-app artist info (photo, bio, stats, top tracks & albums) with zero API keys."""
 
@@ -1770,26 +1791,103 @@ class ArtistInfoWorker(QThread):
 
         q = urllib.parse.quote_plus(self.artist_name)
 
+        fallback_art_url = ""
+
+        # Primary: Apple Music / iTunes (broader indie/electronic/doujin catalog)
         try:
-            dz = _http_get_json(f"https://api.deezer.com/search/artist?q={q}&limit=5", timeout=6)
+            it = _http_get_json(
+                f"https://itunes.apple.com/search?term={q}&entity=musicArtist&limit=5",
+                timeout=5,
+            )
+            results = it.get("results") or []
+            matching_it = [
+                r for r in results if _artist_names_match(r.get("artistName") or "", self.artist_name)
+            ]
+            hit = next(
+                (r for r in matching_it if r.get("primaryGenreName")),
+                matching_it[0] if matching_it else None,
+            )
+            if hit:
+                info["name"] = hit.get("artistName") or info["name"]
+                if hit.get("primaryGenreName"):
+                    info["genre"] = hit["primaryGenreName"]
+                if hit.get("artistLinkUrl") and (not self.fallback_url or "search" in info["url"]):
+                    info["url"] = hit["artistLinkUrl"]
+
+                it_aid = hit.get("artistId")
+                if it_aid:
+                    try:
+                        it_songs = _http_get_json(
+                            f"https://itunes.apple.com/lookup?id={it_aid}&entity=song&limit=10",
+                            timeout=5,
+                        )
+                        for item in (it_songs.get("results") or []):
+                            if item.get("wrapperType") == "track" and item.get("kind") == "song":
+                                if not fallback_art_url:
+                                    fallback_art_url = (item.get("artworkUrl100") or "").replace(
+                                        "100x100bb", "300x300bb"
+                                    )
+                                if len(info["top_tracks"]) < 6:
+                                    info["top_tracks"].append(
+                                        {
+                                            "title": item.get("trackName", ""),
+                                            "album": item.get("collectionName", ""),
+                                            "duration": int(item.get("trackTimeMillis") or 0) // 1000,
+                                            "preview": item.get("previewUrl", ""),
+                                            "url": item.get("trackViewUrl", ""),
+                                        }
+                                    )
+                    except Exception:
+                        pass
+
+                    try:
+                        it_albs = _http_get_json(
+                            f"https://itunes.apple.com/lookup?id={it_aid}&entity=album&limit=10",
+                            timeout=5,
+                        )
+                        seen_alb = set()
+                        for item in (it_albs.get("results") or []):
+                            if item.get("wrapperType") == "collection":
+                                atitle = (item.get("collectionName") or "").strip()
+                                if atitle and atitle.lower() not in seen_alb:
+                                    seen_alb.add(atitle.lower())
+                                    info["albums"].append(
+                                        {
+                                            "title": atitle,
+                                            "release_date": (item.get("releaseDate") or "")[:4],
+                                            "record_type": (item.get("collectionType") or "").title(),
+                                            "url": item.get("collectionViewUrl", ""),
+                                        }
+                                    )
+                        if info["albums"]:
+                            info["nb_album"] = len(info["albums"])
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        # Secondary enrichment: Deezer (artist portrait, fan count, and fallback tracks/albums)
+        try:
+            dz = _http_get_json(f"https://api.deezer.com/search/artist?q={q}&limit=10", timeout=6)
             hits = dz.get("data") or []
             best = next(
-                (h for h in hits if (h.get("name") or "").lower() == self.artist_name.lower()),
-                hits[0] if hits else None,
+                (h for h in hits if _artist_names_match(h.get("name") or "", self.artist_name)),
+                None,
             )
 
             if best:
                 aid = best.get("id")
                 info["name"] = best.get("name") or info["name"]
                 info["fans"] = int(best.get("nb_fan") or 0)
-                info["nb_album"] = int(best.get("nb_album") or 0)
-                if best.get("link") and not self.fallback_url:
+                if best.get("nb_album"):
+                    info["nb_album"] = int(best["nb_album"])
+                if best.get("link") and not self.fallback_url and "search" in info["url"]:
                     info["url"] = best["link"]
                 pic = best.get("picture_big") or best.get("picture_medium") or best.get("picture") or ""
                 if pic:
                     info["image_bytes"] = _http_get_bytes(pic, timeout=5)
 
-                if aid:
+                if aid and not info["top_tracks"]:
                     try:
                         top_data = _http_get_json(f"https://api.deezer.com/artist/{aid}/top?limit=6", timeout=5)
                         for tr in (top_data.get("data") or []):
@@ -1805,6 +1903,7 @@ class ArtistInfoWorker(QThread):
                     except Exception:
                         pass
 
+                if aid and not info["albums"]:
                     try:
                         alb_data = _http_get_json(f"https://api.deezer.com/artist/{aid}/albums?limit=8", timeout=5)
                         seen_alb = set()
@@ -1825,23 +1924,11 @@ class ArtistInfoWorker(QThread):
         except Exception:
             pass
 
-        try:
-            it = _http_get_json(
-                f"https://itunes.apple.com/search?term={q}&entity=musicArtist&limit=3",
-                timeout=5,
-            )
-            results = it.get("results") or []
-            if results:
-                hit = next(
-                    (r for r in results if (r.get("artistName") or "").lower() == self.artist_name.lower()),
-                    results[0],
-                )
-                if hit.get("primaryGenreName"):
-                    info["genre"] = hit["primaryGenreName"]
-                if hit.get("artistLinkUrl") and (not self.fallback_url or "search" in info["url"]):
-                    info["url"] = hit["artistLinkUrl"]
-        except Exception:
-            pass
+        if not info["image_bytes"] and fallback_art_url:
+            try:
+                info["image_bytes"] = _http_get_bytes(fallback_art_url, timeout=5)
+            except Exception:
+                pass
 
         try:
             wiki_slug = urllib.parse.quote(self.artist_name.replace(" ", "_"))
