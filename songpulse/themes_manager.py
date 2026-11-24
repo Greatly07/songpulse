@@ -8,6 +8,41 @@ from .config import APP_DIR, THEME_PHOTOS_DIR, THEMES_DIR
 from .waveforms import resolve_template_waveform
 
 TEMPLATE_FILENAME = "_template.json"
+README_FILENAME = "README.txt"
+
+THEME_README_TEXT = """SongPulse Custom Themes
+=======================
+
+Installing or Creating a Custom Theme
+-------------------------------------
+- In the app: Go to Settings -> Create Theme (or select a custom theme and click Edit).
+- Manually: Copy `_template.json`, rename it (e.g. `my_theme.json`), and edit its values.
+  Any `.json` file placed directly in this folder (except `_template.json`) will appear
+  in the Settings -> Theme dropdown.
+
+Using Photos / Images
+---------------------
+- When you pick an image in Create/Edit Theme, SongPulse copies it into the `photos\\`
+  subfolder automatically.
+- If installing a shared theme manually, put its `.json` file in this folder and its
+  image files in `photos\\` (or directly in this folder). Reference them in the `.json`
+  as `"photos/filename.png"`, `"filename.png"`, or an absolute path.
+
+Deleting a Custom Theme
+-----------------------
+1. Delete the theme's `.json` file from this folder (e.g. `my_theme.json`).
+   If that theme was currently active, SongPulse will fall back to the Dark theme.
+2. Theme photos in `photos\\` are not deleted automatically when you remove a `.json`.
+   You can delete them manually, or use the Storage / Cleanup tool in Settings to
+   remove unused theme photos no longer referenced by any `.json`.
+
+Notes
+-----
+- Do not delete `_template.json`; it is excluded from the theme list and recreated
+  automatically if missing.
+- Subfolders such as `miku\\` and `teto\\` contain built-in template themes and assets
+  managed by SongPulse.
+"""
 
 THEME_TEMPLATE = {
     "_comment": "SongPulse Custom Theme Template. Copy and rename this file (e.g. my_theme.json) in the themes folder, or use Settings -> Create Theme.",
@@ -84,6 +119,14 @@ def ensure_theme_template_and_assets():
         try:
             with open(tmpl_path, "w", encoding="utf-8") as f:
                 json.dump(THEME_TEMPLATE, f, indent=2)
+        except Exception:
+            pass
+
+    readme_path = os.path.join(THEMES_DIR, README_FILENAME)
+    if not os.path.exists(readme_path):
+        try:
+            with open(readme_path, "w", encoding="utf-8") as f:
+                f.write(THEME_README_TEXT)
         except Exception:
             pass
 
