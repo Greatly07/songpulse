@@ -1,0 +1,54 @@
+{
+  "id": "miku",
+  "name": "Miku",
+  "display_name": "Miku (Blue Gradient + Pulse Line)",
+  "base_dark": true,
+  "background": {
+    "type": "gradient",
+    "color1": "#061926",
+    "color2": "#0C3E59",
+    "angle": 145,
+    "image": "",
+    "blur": 0,
+    "overlay_alpha": 0
+  },
+  "sidebar": {
+    "type": "image",
+    "color1": "#061C2B",
+    "color2": "#0C485C",
+    "image": "miku_sidebar.png",
+    "fit": "cutout",
+    "blur": 1,
+    "glass_alpha": 42
+  },
+  "miniplayer": {
+    "use_main_bg": false,
+    "type": "image",
+    "color1": "#061C2B",
+    "color2": "#0C485C",
+    "angle": 145,
+    "image": "miku_miniplayer.png",
+    "fit": "cover",
+    "blur": 1,
+    "overlay_alpha": 52,
+    "glass_alpha": 52
+  },
+  "colors": {
+    "accent": "#39C5BB",
+    "accent_secondary": "#38BDF8",
+    "card_bg": "rgba(9, 29, 44, 0.72)",
+    "card_border": "rgba(57, 197, 187, 0.30)",
+    "text": "#F0FDFA",
+    "muted": "#99D6DC"
+  },
+  "waveform": {
+    "preset": "miku",
+    "style": "pulse_line",
+    "mirror": true,
+    "idle_dots": true,
+    "flip_hz": true,
+    "hair_ties": true,
+    "color1": "#39C5BB",
+    "color2": "#38BDF8"
+  }
+}
