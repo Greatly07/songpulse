@@ -12,6 +12,7 @@ import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 import zipfile
 
 import numpy as np
@@ -1041,21 +1042,48 @@ def _match_song_by_whisper_lyrics(
     cancel_evt: threading.Event | None = None,
 ):
     """Transcribes sung lyrics locally via faster-whisper and queries LRCLIB + iTunes."""
+    if cancel_evt and cancel_evt.is_set():
+        return None
     wm = model_mgr.load_whisper(model_id, force_cpu=force_cpu)
+    if cancel_evt and cancel_evt.is_set():
+        return None
     t0 = time.perf_counter()
-    segments, _info = wm.transcribe(wav_path, beam_size=3, vad_filter=True)
-    lines = []
-    for seg in segments:
-        if cancel_evt and cancel_evt.is_set():
-            return None
-        txt = (seg.text or "").strip()
-        if txt:
-            lines.append(txt)
+    used_cpu = bool(force_cpu or not model_mgr.gpu_available)
+    try:
+        segments, _info = wm.transcribe(wav_path, beam_size=3, vad_filter=True)
+        lines = []
+        for seg in segments:
+            if cancel_evt and cancel_evt.is_set():
+                return None
+            txt = (seg.text or "").strip()
+            if txt:
+                lines.append(txt)
+    except RuntimeError as exc:
+        err_low = str(exc).lower()
+        if not used_cpu and any(k in err_low for k in ("cublas", "cudnn", "cuda", "dll")):
+            if cancel_evt and cancel_evt.is_set():
+                return None
+            wm = model_mgr.load_whisper(model_id, force_cpu=True)
+            used_cpu = True
+            t0 = time.perf_counter()
+            segments, _info = wm.transcribe(wav_path, beam_size=3, vad_filter=True)
+            lines = []
+            for seg in segments:
+                if cancel_evt and cancel_evt.is_set():
+                    return None
+                txt = (seg.text or "").strip()
+                if txt:
+                    lines.append(txt)
+        else:
+            raise
     elapsed = time.perf_counter() - t0
-    if force_cpu or not model_mgr.gpu_available:
+    if used_cpu:
         model_mgr.last_cpu_time = elapsed
     else:
         model_mgr.last_gpu_time = elapsed
+
+    if cancel_evt and cancel_evt.is_set():
+        return None
 
     transcript = " ".join(lines).strip()
     words = [w for w in re.findall(r"[A-Za-z0-9'\u3040-\u30ff\u4e00-\u9fff]+", transcript) if len(w) > 1]
@@ -1068,6 +1096,8 @@ def _match_song_by_whisper_lyrics(
     title, artist, album, lyrics_txt = "", "", "", ""
 
     # 1. Search LRCLIB (free open lyrics database)
+    if cancel_evt and cancel_evt.is_set():
+        return None
     try:
         lrc_hits = _http_get_json(f"https://lrclib.net/api/search?q={q}", timeout=6)
         if isinstance(lrc_hits, list) and lrc_hits:
@@ -1079,6 +1109,8 @@ def _match_song_by_whisper_lyrics(
     except Exception:
         pass
 
+    if cancel_evt and cancel_evt.is_set():
+        return None
     if not title or not artist:
         return None
 
@@ -1106,6 +1138,9 @@ def _match_song_by_whisper_lyrics(
                 album = h.get("collectionName") or ""
     except Exception:
         pass
+
+    if cancel_evt and cancel_evt.is_set():
+        return None
 
     return _build_song_dict_from_metadata(
         title=title,
@@ -1206,6 +1241,7 @@ class IdentifyWorker(QThread):
         self.cancel_evt = cancel_evt
         self.custom_wav_path = custom_wav_path or ""
         self.test_models = list(test_models) if test_models is not None else []
+        self._run_id = uuid.uuid4().hex[:8]
         self._loop = None
         self._active_task = None
         self._loop_lock = threading.Lock()
@@ -1222,12 +1258,51 @@ class IdentifyWorker(QThread):
             except Exception:
                 pass
 
+    async def _run_blocking_cancellable(self, fn, on_cancelled_cleanup=None):
+        """Runs a blocking function in a daemon thread while polling cancel_evt.
+        If cancelled, raises asyncio.CancelledError immediately so the UI never hangs
+        waiting for C++/CTranslate2/ONNX/HTTP calls to unwind.
+        """
+        if self.cancel_evt.is_set():
+            raise asyncio.CancelledError()
+
+        done_evt = threading.Event()
+        box = {"result": None, "error": None}
+        cancel_evt = self.cancel_evt
+
+        def _runner():
+            try:
+                box["result"] = fn()
+            except BaseException as exc:
+                box["error"] = exc
+            finally:
+                done_evt.set()
+                if cancel_evt.is_set() and on_cancelled_cleanup is not None:
+                    try:
+                        on_cancelled_cleanup()
+                    except Exception:
+                        pass
+
+        t = threading.Thread(target=_runner, daemon=True, name="SongPulse-AI-Exec")
+        t.start()
+
+        while not done_evt.is_set():
+            if cancel_evt.is_set():
+                raise asyncio.CancelledError()
+            await asyncio.sleep(0.05)
+
+        if cancel_evt.is_set():
+            raise asyncio.CancelledError()
+        if box["error"] is not None:
+            raise box["error"]
+        return box["result"]
+
     async def _close_shazam(self, shazam: Shazam):
         try:
             hc = getattr(shazam, "http_client", None)
             if hc is not None and hasattr(hc, "close"):
-                await hc.close()
-        except Exception:
+                await asyncio.wait_for(hc.close(), timeout=0.5)
+        except BaseException:
             pass
 
     async def _recognize_cancellable(self, shazam: Shazam, wav_path: str, timeout: float = 10.0):
@@ -1244,7 +1319,7 @@ class IdentifyWorker(QThread):
                 if self.cancel_evt.is_set():
                     task.cancel()
                     try:
-                        await task
+                        await asyncio.wait_for(task, timeout=0.25)
                     except BaseException:
                         pass
                     raise asyncio.CancelledError()
@@ -1252,7 +1327,7 @@ class IdentifyWorker(QThread):
                 if remaining <= 0:
                     task.cancel()
                     try:
-                        await task
+                        await asyncio.wait_for(task, timeout=0.25)
                     except BaseException:
                         pass
                     return None
@@ -1279,19 +1354,27 @@ class IdentifyWorker(QThread):
 
     def _run_ai_separation_files(self, raw_wav: str, model_name: str, generated_files: list):
         """Runs UVR model separation and returns [(wav_path, status_msg, method_label)]."""
+        if self.cancel_evt.is_set():
+            return []
         use_cpu, gpu_note = self._should_use_cpu_fallback()
         if use_cpu:
             why = f" ({gpu_note})" if gpu_note else ""
-            self.status_update.emit(f"Running AI rescue on CPU{why}...")
+            if not self.cancel_evt.is_set():
+                self.status_update.emit(f"Running AI rescue on CPU{why}...")
             sep = self.model_mgr.get_cpu_separator(model_name)
+            if self.cancel_evt.is_set():
+                return []
             t0 = time.perf_counter()
             out_files = sep.separate(raw_wav)
             elapsed = time.perf_counter() - t0
             self.model_mgr.last_cpu_time = elapsed
             method_label = f"AI Rescue on CPU ({elapsed:.1f}s)"
         else:
-            self.status_update.emit("Running AI rescue on GPU...")
+            if not self.cancel_evt.is_set():
+                self.status_update.emit("Running AI rescue on GPU...")
             sep = self.model_mgr.load_default_gpu(model_name)
+            if self.cancel_evt.is_set():
+                return []
             t0 = time.perf_counter()
             out_files = sep.separate(raw_wav)
             elapsed = time.perf_counter() - t0
@@ -1301,6 +1384,14 @@ class IdentifyWorker(QThread):
         resolved = [
             f if os.path.isabs(f) else os.path.join(TEMP_DIR, f) for f in out_files
         ]
+        if self.cancel_evt.is_set():
+            for f in resolved:
+                try:
+                    if f and os.path.exists(f):
+                        os.remove(f)
+                except OSError:
+                    pass
+            return []
         generated_files.extend(resolved)
 
         # Prefer clean music / dry / no-reverb / no-noise / instrumental stem first
@@ -1337,18 +1428,26 @@ class IdentifyWorker(QThread):
         label_prefix: str = "",
     ):
         """Runs the configured local AI rescue model (UVR or Whisper) + optional speed sweep."""
+        if self.cancel_evt.is_set():
+            raise asyncio.CancelledError()
         model_name = model_override or self.settings.get("ai_model", UVR_MODEL_NAME)
         model_disp = self._model_display_name(model_name)
         use_cpu, _note = self._should_use_cpu_fallback()
 
+        def _cleanup_temp_raw():
+            if self.mode != "saved_clip" and raw_wav and os.path.exists(raw_wav):
+                try:
+                    os.remove(raw_wav)
+                except OSError:
+                    pass
+
         if is_whisper_model_id(model_name):
             self.status_update.emit(f"Transcribing lyrics with {model_disp}...")
-            loop = asyncio.get_running_loop()
-            res = await loop.run_in_executor(
-                None,
+            res = await self._run_blocking_cancellable(
                 lambda: _match_song_by_whisper_lyrics(
                     raw_wav, self.model_mgr, model_name, force_cpu=use_cpu, cancel_evt=self.cancel_evt
                 ),
+                on_cancelled_cleanup=_cleanup_temp_raw,
             )
             if self.cancel_evt.is_set():
                 raise asyncio.CancelledError()
@@ -1357,10 +1456,9 @@ class IdentifyWorker(QThread):
                     res["method"] = f"{label_prefix} • {model_disp} • {res.get('method', '')}".strip(" •")
                 return res
         else:
-            loop = asyncio.get_running_loop()
-            stems = await loop.run_in_executor(
-                None,
+            stems = await self._run_blocking_cancellable(
                 lambda: self._run_ai_separation_files(raw_wav, model_name, generated_files),
+                on_cancelled_cleanup=_cleanup_temp_raw,
             )
             if self.cancel_evt.is_set():
                 raise asyncio.CancelledError()
@@ -1377,8 +1475,21 @@ class IdentifyWorker(QThread):
             for factor, tag in ((0.84, "Sped-Up Rescue"), (1.18, "Slowed Rescue")):
                 if self.cancel_evt.is_set():
                     raise asyncio.CancelledError()
-                sp_wav = os.path.join(TEMP_DIR, f"speed_{int(factor * 100)}.wav")
-                if _write_speed_variant(raw_wav, factor, sp_wav):
+                sp_wav = os.path.join(TEMP_DIR, f"speed_{int(factor * 100)}_{self._run_id}.wav")
+
+                def _cleanup_speed(path=sp_wav):
+                    for target in (path, raw_wav if self.mode != "saved_clip" else ""):
+                        if target and os.path.exists(target):
+                            try:
+                                os.remove(target)
+                            except OSError:
+                                pass
+
+                wrote = await self._run_blocking_cancellable(
+                    lambda f=factor, p=sp_wav: _write_speed_variant(raw_wav, f, p),
+                    on_cancelled_cleanup=_cleanup_speed,
+                )
+                if wrote:
                     generated_files.append(sp_wav)
                     self.status_update.emit(f"Checking speed-adjusted audio ({tag})...")
                     out = await self._recognize_cancellable(shazam, sp_wav, timeout=8.0)
@@ -1410,7 +1521,7 @@ class IdentifyWorker(QThread):
                     if probe_task and not probe_task.done():
                         probe_task.cancel()
                         try:
-                            await probe_task
+                            await asyncio.wait_for(probe_task, timeout=0.25)
                         except BaseException:
                             pass
                     self.cancelled.emit()
@@ -1519,7 +1630,7 @@ class IdentifyWorker(QThread):
             if probe_task and not probe_task.done():
                 probe_task.cancel()
                 try:
-                    await probe_task
+                    await asyncio.wait_for(probe_task, timeout=0.25)
                 except BaseException:
                     pass
             with self._loop_lock:
@@ -1607,7 +1718,7 @@ class IdentifyWorker(QThread):
             await self._close_shazam(shazam)
 
     def run(self):
-        raw_wav = os.path.join(TEMP_DIR, "snapshot.wav")
+        raw_wav = os.path.join(TEMP_DIR, f"snapshot_{self._run_id}.wav")
         generated_files = []
         started_temp_capture = False
 

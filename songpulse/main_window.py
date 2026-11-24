@@ -3990,7 +3990,7 @@ class SongPulseWindow(QMainWindow):
             return
 
         self.is_processing = True
-        self.cancel_evt.clear()
+        self.cancel_evt = threading.Event()
         self.pulse_btn.setEnabled(False)
         self.pulse_btn.set_scanning(True)
         scan_label = "Listening..." if mode == "live" else "Scanning..."
@@ -4046,6 +4046,8 @@ class SongPulseWindow(QMainWindow):
         self.live_status_lbl.setText("Cancelling...")
 
     def _on_worker_status(self, text):
+        if self.cancel_evt.is_set():
+            return
         self.live_status_lbl.setText(text)
         if self.hud.isVisible() or self.settings.get("always_show_status_hud", True):
             self.hud.show_message(text, dark=bool(self.last_dark_state), dot_color="#3B82F6")
@@ -4070,6 +4072,8 @@ class SongPulseWindow(QMainWindow):
         return False
 
     def _on_song_found(self, song):
+        if self.cancel_evt.is_set():
+            return
         self.hud.hide()
         song["reidentified"] = self._is_song_in_library(song)
         self.history.insert(0, song)
@@ -4106,6 +4110,8 @@ class SongPulseWindow(QMainWindow):
             self._update_gpu_indicator()
 
     def _on_no_match(self):
+        if self.cancel_evt.is_set():
+            return
         self.live_status_lbl.setText("No match found. Try again during a clearer part of the song.")
         if (
             self.hud.isVisible()
@@ -4124,6 +4130,8 @@ class SongPulseWindow(QMainWindow):
         self.hud.hide()
 
     def _on_error(self, msg):
+        if self.cancel_evt.is_set():
+            return
         self.live_status_lbl.setText(f"Error: {msg}")
         if (
             self.hud.isVisible()
