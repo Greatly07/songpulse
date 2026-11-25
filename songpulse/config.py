@@ -242,7 +242,7 @@ def get_text_scale(text_size_key: str) -> float:
 
 
 DEFAULT_SETTINGS = {
-    "theme": "auto",  # "auto", "dark", "light", "miku", "teto", or "custom:<id>"
+    "theme": "auto",  # "auto", "dark", "light", or "custom:<id>"
     "icon_color": "theme",  # "theme" or a preset id from ICON_COLOR_PRESETS
     "text_size": "small",  # "small", "medium", "large", "xlarge"
     "waveform_style": "auto",  # "auto", "radial", "horizontal", "pulse_line", "bar", "dots"
@@ -303,6 +303,10 @@ def load_settings():
         data.get("ai_model", UVR_MODEL_NAME)
     ):
         data["use_ai_separation"] = False
+
+    t_val = str(data.get("theme") or "auto").strip()
+    if t_val in ("miku", "teto") and os.path.isfile(os.path.join(THEMES_DIR, f"{t_val}.json")):
+        data["theme"] = f"custom:{t_val}"
 
     rem = list(data.get("remembered_devices") or [])
     for d in data.get("target_devices") or []:

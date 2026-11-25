@@ -44,8 +44,9 @@ Notes
 -----
 - Do not delete `_template.json`; it is excluded from the theme list and recreated
   automatically if missing.
-- Subfolders such as `miku\\` and `teto\\` contain built-in template themes and assets
-  managed by SongPulse.
+- Subfolders such as `miku\\` and `teto\\` from older versions are migrated to editable
+  custom `.json` themes automatically. Additional presets can be installed from Settings ->
+  Download Presets.
 """
 
 THEME_TEMPLATE = {
@@ -116,9 +117,50 @@ def _bundled_themes_roots() -> list[str]:
     ]
 
 
+def _migrate_legacy_template_folders():
+    """Migrates legacy DATA_DIR/themes/miku and teto folders into editable custom .json themes."""
+    for tid in ("miku", "teto"):
+        legacy_dir = os.path.join(THEMES_DIR, tid)
+        if not os.path.isdir(legacy_dir):
+            continue
+        dest_json = os.path.join(THEMES_DIR, f"{tid}.json")
+        src_json = ""
+        for fname in (f"{tid}.json", "theme.json"):
+            cand = os.path.join(legacy_dir, fname)
+            if os.path.isfile(cand):
+                src_json = cand
+                break
+        try:
+            for entry in os.scandir(legacy_dir):
+                if entry.is_file() and entry.name.lower().endswith(
+                    (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif")
+                ):
+                    dest_img = os.path.join(THEME_PHOTOS_DIR, entry.name)
+                    if not os.path.isfile(dest_img):
+                        shutil.copy2(entry.path, dest_img)
+            if src_json and not os.path.isfile(dest_json):
+                with open(src_json, "r", encoding="utf-8") as f:
+                    raw = json.load(f)
+                if isinstance(raw, dict):
+                    raw.pop("id", None)
+                    raw.pop("display_name", None)
+                    for sec in ("background", "sidebar", "miniplayer"):
+                        sec_cfg = raw.get(sec)
+                        if isinstance(sec_cfg, dict):
+                            img = str(sec_cfg.get("image") or "").strip()
+                            if img and not img.startswith("photos/") and not os.path.isabs(img):
+                                sec_cfg["image"] = f"photos/{os.path.basename(img)}"
+                    with open(dest_json, "w", encoding="utf-8") as f:
+                        json.dump(raw, f, indent=2)
+            shutil.rmtree(legacy_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+
 def ensure_theme_template_and_assets():
     os.makedirs(THEMES_DIR, exist_ok=True)
     os.makedirs(THEME_PHOTOS_DIR, exist_ok=True)
+    _migrate_legacy_template_folders()
     tmpl_path = os.path.join(THEMES_DIR, TEMPLATE_FILENAME)
     if not os.path.exists(tmpl_path):
         try:
@@ -445,6 +487,15 @@ def load_theme_config(theme_key: str, system_dark: bool) -> dict:
                     raw = json.load(f)
                 if isinstance(raw, dict):
                     return _normalize_loaded_theme(raw, key, base_dir=tdir)
+            except Exception:
+                pass
+        custom_path = os.path.join(THEMES_DIR, f"{key}.json")
+        if os.path.isfile(custom_path):
+            try:
+                with open(custom_path, "r", encoding="utf-8") as f:
+                    raw = json.load(f)
+                if isinstance(raw, dict):
+                    return _normalize_loaded_theme(raw, f"custom:{key}", base_dir=THEMES_DIR)
             except Exception:
                 pass
 
