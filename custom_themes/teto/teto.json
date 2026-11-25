@@ -1,0 +1,54 @@
+{
+  "name": "Teto",
+  "base_dark": true,
+  "background": {
+    "type": "gradient",
+    "color1": "#1D070F",
+    "color2": "#4A1224",
+    "angle": 145,
+    "image": "",
+    "blur": 0,
+    "overlay_alpha": 0
+  },
+  "sidebar": {
+    "type": "image",
+    "color1": "#1A060D",
+    "color2": "#3B0E1D",
+    "image": "photos/teto_sidebar.png",
+    "fit": "cutout",
+    "blur": 1,
+    "glass_alpha": 42
+  },
+  "miniplayer": {
+    "use_main_bg": false,
+    "type": "image",
+    "color1": "#1A060D",
+    "color2": "#3B0E1D",
+    "angle": 145,
+    "image": "photos/teto_miniplayer.png",
+    "fit": "cover",
+    "blur": 1,
+    "overlay_alpha": 52,
+    "glass_alpha": 52
+  },
+  "colors": {
+    "accent": "#E11D48",
+    "accent_secondary": "#FB7185",
+    "card_bg": "rgba(34, 10, 19, 0.72)",
+    "card_border": "rgba(244, 63, 94, 0.30)",
+    "text": "#FFF5F7",
+    "muted": "#E2AAB8"
+  },
+  "waveform": {
+    "preset": "teto",
+    "style": "horizontal",
+    "mirror": true,
+    "flip_hz": false,
+    "idle_dots": true,
+    "hair_ties": false,
+    "right_alt_white": true,
+    "teto_bow": true,
+    "color1": "#E11D48",
+    "color2": "#FB7185"
+  }
+}
