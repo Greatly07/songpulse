@@ -137,6 +137,7 @@ from .widgets import (
     NoWheelSpinBox,
     PulseIdentifyWidget,
     ResponsiveLinksBar,
+    RoundedPopupEventFilter,
     ScrollThroughMenu,
     SongResultPopup,
     SubtleStatusHUD,
@@ -289,6 +290,10 @@ class SongPulseWindow(QMainWindow):
         self.sidebar_anim.finished.connect(self._on_sidebar_anim_finished)
 
         self._build_ui()
+        app_inst = QApplication.instance()
+        if app_inst is not None:
+            self._tooltip_filter = RoundedPopupEventFilter(self)
+            app_inst.installEventFilter(self._tooltip_filter)
         self.mini_window = MiniIdentifyWindow(self.app_icon)
         self.mini_window.listen_clicked.connect(lambda: self.trigger_identify(mode="live"))
         self.mini_window.buffer_clicked.connect(lambda: self.trigger_identify(mode="buffer"))
@@ -978,7 +983,7 @@ class SongPulseWindow(QMainWindow):
         self.lib_sort_combo.currentIndexChanged.connect(self._on_library_sort_changed)
 
         self.pl_download_btn = QPushButton("Download Playlist")
-        self.pl_download_btn.setObjectName("PlatformBtn")
+        self.pl_download_btn.setObjectName("ToolbarBtn")
         self.pl_download_btn.setToolTip(
             "Download this playlist into a new folder with the playlist name using yt-dlp Downloader"
         )
@@ -986,7 +991,7 @@ class SongPulseWindow(QMainWindow):
         self.pl_download_btn.clicked.connect(self._download_active_playlist)
 
         self.pl_rename_btn = QPushButton("Rename")
-        self.pl_rename_btn.setObjectName("PlatformBtn")
+        self.pl_rename_btn.setObjectName("ToolbarBtn")
         self.pl_rename_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.pl_rename_btn.clicked.connect(self._rename_active_playlist)
         self.pl_rename_btn.hide()
@@ -1172,16 +1177,16 @@ class SongPulseWindow(QMainWindow):
                 "Dots Ring",
             ]
         )
-        self.wf_style_combo.currentIndexChanged.connect(self._mark_unsaved)
+        self.wf_style_combo.currentIndexChanged.connect(self._on_wf_style_changed)
         wf_row.addWidget(self.wf_style_combo)
         app_lay.addLayout(wf_row)
 
         wf_opts_row = QHBoxLayout()
         wf_opts_row.setSpacing(14)
         self.wf_mirror_chk = QCheckBox("Mirror waveform")
-        self.wf_mirror_chk.stateChanged.connect(self._mark_unsaved)
+        self.wf_mirror_chk.stateChanged.connect(self._on_wf_opt_chk_changed)
         self.wf_idle_dots_chk = QCheckBox("Show dots when silent")
-        self.wf_idle_dots_chk.stateChanged.connect(self._mark_unsaved)
+        self.wf_idle_dots_chk.stateChanged.connect(self._on_wf_opt_chk_changed)
         wf_opts_row.addWidget(self.wf_mirror_chk)
         wf_opts_row.addWidget(self.wf_idle_dots_chk)
         wf_opts_row.addStretch()
@@ -1741,34 +1746,56 @@ class SongPulseWindow(QMainWindow):
     def _on_theme_combo_changed(self, *_args):
         if getattr(self, "_suppress_unsaved", False):
             return
-        if hasattr(self, "wf_style_combo") and self.wf_style_combo.currentIndex() == 0:
-            self._sync_theme_waveform_checkboxes(self.theme_combo.currentData() or "auto")
+        self._sync_waveform_auto_checkboxes()
         self._mark_unsaved()
 
-    def _sync_theme_waveform_checkboxes(self, theme_key: str):
-        if self.settings.get("waveform_style", "auto") != "auto":
+    def _on_wf_style_changed(self, *_args):
+        if getattr(self, "_suppress_unsaved", False):
             return
-        if (
-            theme_key == self._saved_settings_snapshot.get("theme", "auto")
-            and self._saved_settings_snapshot.get("waveform_style", "auto") == "auto"
-        ):
-            mirror = bool(self._saved_settings_snapshot.get("waveform_mirror", False))
-            idle_dots = bool(self._saved_settings_snapshot.get("waveform_idle_dots", False))
-        else:
-            cfg = load_theme_config(theme_key, is_windows_dark_mode())
+        self._sync_waveform_auto_checkboxes()
+        self._mark_unsaved()
+
+    def _on_wf_opt_chk_changed(self, *_args):
+        if getattr(self, "_suppress_unsaved", False):
+            return
+        if hasattr(self, "wf_style_combo") and self.wf_style_combo.currentIndex() != 0:
+            self._manual_wf_mirror = self.wf_mirror_chk.isChecked()
+            self._manual_wf_idle_dots = self.wf_idle_dots_chk.isChecked()
+        self._mark_unsaved()
+
+    def _sync_waveform_auto_checkboxes(self):
+        if not hasattr(self, "wf_style_combo"):
+            return
+        is_auto = self.wf_style_combo.currentIndex() == 0
+        if is_auto:
+            t_key = self.theme_combo.currentData() or self.settings.get("theme", "auto")
+            cfg = load_theme_config(t_key, is_windows_dark_mode())
             wf = cfg.get("waveform", {})
             mirror = bool(wf.get("mirror", False))
             idle_dots = bool(wf.get("idle_dots", False))
-        self.settings["waveform_mirror"] = mirror
-        self.settings["waveform_idle_dots"] = idle_dots
-        if hasattr(self, "wf_mirror_chk"):
-            self.wf_mirror_chk.blockSignals(True)
-            self.wf_mirror_chk.setChecked(mirror)
-            self.wf_mirror_chk.blockSignals(False)
-        if hasattr(self, "wf_idle_dots_chk"):
-            self.wf_idle_dots_chk.blockSignals(True)
-            self.wf_idle_dots_chk.setChecked(idle_dots)
-            self.wf_idle_dots_chk.blockSignals(False)
+            if hasattr(self, "wf_mirror_chk"):
+                self.wf_mirror_chk.blockSignals(True)
+                self.wf_mirror_chk.setChecked(mirror)
+                self.wf_mirror_chk.setEnabled(False)
+                self.wf_mirror_chk.blockSignals(False)
+            if hasattr(self, "wf_idle_dots_chk"):
+                self.wf_idle_dots_chk.blockSignals(True)
+                self.wf_idle_dots_chk.setChecked(idle_dots)
+                self.wf_idle_dots_chk.setEnabled(False)
+                self.wf_idle_dots_chk.blockSignals(False)
+        else:
+            mirror = bool(getattr(self, "_manual_wf_mirror", self.settings.get("waveform_mirror", False)))
+            idle_dots = bool(getattr(self, "_manual_wf_idle_dots", self.settings.get("waveform_idle_dots", False)))
+            if hasattr(self, "wf_mirror_chk"):
+                self.wf_mirror_chk.blockSignals(True)
+                self.wf_mirror_chk.setChecked(mirror)
+                self.wf_mirror_chk.setEnabled(True)
+                self.wf_mirror_chk.blockSignals(False)
+            if hasattr(self, "wf_idle_dots_chk"):
+                self.wf_idle_dots_chk.blockSignals(True)
+                self.wf_idle_dots_chk.setChecked(idle_dots)
+                self.wf_idle_dots_chk.setEnabled(True)
+                self.wf_idle_dots_chk.blockSignals(False)
 
     def _apply_and_save_custom_theme(self, theme_key: str):
         cfg = load_theme_config(theme_key, is_windows_dark_mode())
@@ -1908,8 +1935,11 @@ class SongPulseWindow(QMainWindow):
             self.wf_style_combo.setCurrentIndex(
                 wf_map.get(self.settings.get("waveform_style", "auto"), 0)
             )
-            self.wf_mirror_chk.setChecked(bool(self.settings.get("waveform_mirror", False)))
-            self.wf_idle_dots_chk.setChecked(bool(self.settings.get("waveform_idle_dots", False)))
+            self._manual_wf_mirror = bool(self.settings.get("waveform_mirror", False))
+            self._manual_wf_idle_dots = bool(self.settings.get("waveform_idle_dots", False))
+            self.wf_mirror_chk.setChecked(self._manual_wf_mirror)
+            self.wf_idle_dots_chk.setChecked(self._manual_wf_idle_dots)
+            self._sync_waveform_auto_checkboxes()
             max_w = int(self.settings.get("waveform_max_width", 620))
             self.wf_maxw_spin.setValue(max_w)
             self.wf_maxw_slider.setValue(max_w)
@@ -2010,8 +2040,8 @@ class SongPulseWindow(QMainWindow):
             (self.icon_color_combo.currentData() or "theme") != snap.get("icon_color", "theme"),
             (self.text_size_combo.currentData() or "small") != snap.get("text_size", "small"),
             cur_wf != snap.get("waveform_style", "auto"),
-            self.wf_mirror_chk.isChecked() != bool(snap.get("waveform_mirror", False)),
-            self.wf_idle_dots_chk.isChecked() != bool(snap.get("waveform_idle_dots", False)),
+            (cur_wf != "auto") and (self.wf_mirror_chk.isChecked() != bool(snap.get("waveform_mirror", False))),
+            (cur_wf != "auto") and (self.wf_idle_dots_chk.isChecked() != bool(snap.get("waveform_idle_dots", False))),
             self.wf_maxw_spin.value() != int(snap.get("waveform_max_width", 620)),
             round(float(self.wf_step_spin.value()), 1) != round(float(snap.get("waveform_step", 0.0) or 0.0), 1),
             self.save_win_size_chk.isChecked() != bool(snap.get("save_window_size", True)),
@@ -2062,8 +2092,9 @@ class SongPulseWindow(QMainWindow):
         self.settings["text_size"] = self.text_size_combo.currentData() or "small"
         wf_styles = ["auto", "radial", "horizontal", "pulse_line", "bar", "dots"]
         self.settings["waveform_style"] = wf_styles[max(0, self.wf_style_combo.currentIndex())]
-        self.settings["waveform_mirror"] = self.wf_mirror_chk.isChecked()
-        self.settings["waveform_idle_dots"] = self.wf_idle_dots_chk.isChecked()
+        if self.settings["waveform_style"] != "auto":
+            self.settings["waveform_mirror"] = self.wf_mirror_chk.isChecked()
+            self.settings["waveform_idle_dots"] = self.wf_idle_dots_chk.isChecked()
         self.settings["waveform_max_width"] = self.wf_maxw_spin.value()
         self.settings["waveform_step"] = round(float(self.wf_step_spin.value()), 1)
 
@@ -2951,13 +2982,13 @@ class SongPulseWindow(QMainWindow):
 
         wf_pref = self.settings.get("waveform_style", "auto")
         wf_theme = cfg.get("waveform", {})
-        if self._preview_theme_override is not None:
+        if self._preview_theme_override is not None or wf_pref == "auto":
             eff_style = wf_theme.get("style", "radial")
             eff_mirror = bool(wf_theme.get("mirror", False))
             eff_idle_dots = bool(wf_theme.get("idle_dots", False))
             eff_flip_hz = bool(wf_theme.get("flip_hz", eff_mirror))
         else:
-            eff_style = wf_theme.get("style", "radial") if wf_pref == "auto" else wf_pref
+            eff_style = wf_pref
             eff_mirror = bool(self.settings.get("waveform_mirror", False))
             eff_idle_dots = bool(self.settings.get("waveform_idle_dots", False))
             if wf_theme.get("teto_bow") and "flip_hz" in wf_theme:
@@ -3563,30 +3594,35 @@ class SongPulseWindow(QMainWindow):
         )
         menu.addAction(act_dl)
 
-        def _on_menu_hide():
-            HistoryRowCard._suppress_next_card_click = True
-            HistoryRowCard._suppress_until = time.monotonic() + 0.18
-
-        menu.aboutToHide.connect(_on_menu_hide)
-        HistoryRowCard._context_menu_open = True
-        HistoryRowCard._suppress_next_card_click = False
-        chosen = None
-        try:
-            chosen = menu.exec(global_pos)
-        finally:
-            HistoryRowCard._context_menu_open = False
-            if chosen is not None:
-                HistoryRowCard._suppress_next_card_click = False
-            else:
+        card = next((c for c in self._lib_cards if c._song_id == song_id), None)
+        if card is not None:
+            card.exec_menu(menu, global_pos)
+        else:
+            def _on_menu_hide():
                 HistoryRowCard._suppress_next_card_click = True
                 HistoryRowCard._suppress_until = time.monotonic() + 0.18
-            if self.active_playlist_key == "liked" and not bool(live_song.get("liked", False)):
-                vbar = self.lib_scroll.verticalScrollBar()
-                scroll_pos = vbar.value()
-                self.refresh_library()
-                QTimer.singleShot(0, lambda p=scroll_pos: vbar.setValue(p))
 
-    def _show_card_add_playlist_menu(self, song_id: str, anchor_btn: QPushButton):
+            menu.aboutToHide.connect(_on_menu_hide)
+            HistoryRowCard._context_menu_open = True
+            HistoryRowCard._suppress_next_card_click = False
+            chosen = None
+            try:
+                chosen = menu.exec(global_pos)
+            finally:
+                HistoryRowCard._context_menu_open = False
+                if chosen is not None:
+                    HistoryRowCard._suppress_next_card_click = False
+                else:
+                    HistoryRowCard._suppress_next_card_click = True
+                    HistoryRowCard._suppress_until = time.monotonic() + 0.18
+        if self.active_playlist_key == "liked" and not bool(live_song.get("liked", False)):
+            vbar = self.lib_scroll.verticalScrollBar()
+            scroll_pos = vbar.value()
+            self.refresh_library()
+            QTimer.singleShot(0, lambda p=scroll_pos: vbar.setValue(p))
+        menu.deleteLater()
+
+    def _show_card_add_playlist_menu(self, song_id: str, anchor_btn: QPushButton, card=None):
         menu = ScrollThroughMenu(self.lib_scroll, anchor_btn)
         menu.setMinimumWidth(185)
         if self.playlists:
@@ -3608,7 +3644,12 @@ class SongPulseWindow(QMainWindow):
             lambda checked=False, sid=song_id: self._create_playlist_with_song(sid)
         )
         menu.addAction(act_new_pl)
-        menu.exec(anchor_btn.mapToGlobal(anchor_btn.rect().bottomLeft()))
+        target_card = card or next((c for c in self._lib_cards if c._song_id == song_id), None)
+        pos = anchor_btn.mapToGlobal(anchor_btn.rect().bottomLeft())
+        if target_card is not None:
+            target_card.exec_menu(menu, pos, anchor_btn=anchor_btn)
+        else:
+            menu.exec(pos)
         menu.deleteLater()
 
     def _add_song_to_playlist(self, song_id: str, playlist_id: str):

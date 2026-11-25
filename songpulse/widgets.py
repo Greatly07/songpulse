@@ -10,6 +10,7 @@ from PyQt6.QtCore import (
     QAbstractNativeEventFilter,
     QEvent,
     QMimeData,
+    QObject,
     QPoint,
     QPointF,
     QRect,
@@ -23,6 +24,7 @@ from PyQt6.QtGui import (
     QAction,
     QBrush,
     QColor,
+    QCursor,
     QDrag,
     QFontMetrics,
     QLinearGradient,
@@ -643,6 +645,22 @@ class _WinWheelNativeFilter(QAbstractNativeEventFilter):
         return False, 0
 
 
+class RoundedPopupEventFilter(QObject):
+    """Enables alpha-blended rounded corners on Qt tooltips (QTipLabel) to eliminate white corner artifacts."""
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.Polish:
+            if isinstance(obj, QWidget) and obj.inherits("QTipLabel"):
+                if not obj.testAttribute(Qt.WidgetAttribute.WA_WState_Created):
+                    obj.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+                    obj.setWindowFlags(
+                        obj.windowFlags()
+                        | Qt.WindowType.FramelessWindowHint
+                        | Qt.WindowType.NoDropShadowWindowHint
+                    )
+        return False
+
+
 class ScrollThroughMenu(QMenu):
     """QMenu that keeps a target QScrollArea scrollable with the mouse wheel while open."""
 
@@ -653,6 +671,8 @@ class ScrollThroughMenu(QMenu):
         install_app_filter: bool = True,
     ):
         super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.NoDropShadowWindowHint)
         self._scroll_area = scroll_area
         self._install_app_filter = bool(install_app_filter)
         self._native_filter = None
@@ -811,11 +831,11 @@ class AnimatedLikeButton(QPushButton):
     def _get_heart_path(cls) -> QPainterPath:
         if cls._HEART_PATH is None:
             p = QPainterPath()
-            p.moveTo(0.0, 0.42)
-            p.cubicTo(-0.48, 0.12, -0.50, -0.36, -0.24, -0.38)
-            p.cubicTo(-0.08, -0.39, 0.0, -0.24, 0.0, -0.18)
-            p.cubicTo(0.0, -0.24, 0.08, -0.39, 0.24, -0.38)
-            p.cubicTo(0.50, -0.36, 0.48, 0.12, 0.0, 0.42)
+            p.moveTo(0.0, 0.43)
+            p.cubicTo(-0.52, 0.16, -0.56, -0.34, -0.26, -0.40)
+            p.cubicTo(-0.10, -0.43, -0.02, -0.31, 0.0, -0.24)
+            p.cubicTo(0.02, -0.31, 0.10, -0.43, 0.26, -0.40)
+            p.cubicTo(0.56, -0.34, 0.52, 0.16, 0.0, 0.43)
             cls._HEART_PATH = p
         return cls._HEART_PATH
 
@@ -974,7 +994,7 @@ class AnimatedLikeButton(QPushButton):
             p.setPen(
                 QPen(
                     col,
-                    1.8 / draw_scale,
+                    1.9 / draw_scale,
                     Qt.PenStyle.SolidLine,
                     Qt.PenCapStyle.RoundCap,
                     Qt.PenJoinStyle.RoundJoin,
@@ -1049,6 +1069,7 @@ class HistoryRowCard(QFrame):
         self._glow.setEnabled(False)
         self.setGraphicsEffect(self._glow)
         self._compact = None
+        self._menu_open = False
 
         self._song = song
         self._song_id = song.get("id", "")
@@ -1071,7 +1092,7 @@ class HistoryRowCard(QFrame):
         self.select_chk = QCheckBox()
         self.select_chk.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.select_chk.setChecked(checked)
-        self.select_chk.setFixedSize(16, 16)
+        self.select_chk.setFixedSize(18, 18)
         self.select_chk.setCursor(Qt.CursorShape.PointingHandCursor)
         self.select_chk.setToolTip("Select song")
         self.select_chk.stateChanged.connect(
@@ -1160,15 +1181,15 @@ class HistoryRowCard(QFrame):
         self.like_btn.clicked.connect(lambda: self.like_toggled.emit(self._song_id))
         body.addWidget(self.like_btn)
 
-        # Preferred music site quick play button ("Play on [icon]" / "[icon]" when narrow)
+        # Preferred music site quick play button ("Listen in [icon]" / "[icon]" when narrow)
         pref_label, pref_icon_key, pref_url = preferred_target
         self._pref_label = pref_label
-        self.play_pref_btn = QPushButton("Play on ")
+        self.play_pref_btn = QPushButton("Listen in ")
         self.play_pref_btn.setObjectName("PlatformBtn")
         self.play_pref_btn.setIcon(p_icons.get(pref_icon_key, p_icons["web"]))
         self.play_pref_btn.setIconSize(QSize(15, 15))
         self.play_pref_btn.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
-        self.play_pref_btn.setToolTip(f"Play on {pref_label}")
+        self.play_pref_btn.setToolTip(f"Listen in {pref_label}")
         self.play_pref_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.play_pref_btn.clicked.connect(
             lambda checked=False, u=pref_url: open_external_url(u) if u else None
@@ -1209,22 +1230,71 @@ class HistoryRowCard(QFrame):
         row.addLayout(body, 1)
         self._apply_compact_mode(bool(initial_compact))
 
+    def set_menu_open(self, is_open: bool):
+        self._menu_open = bool(is_open)
+        self.setProperty("menuOpen", self._menu_open)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()
+        if self._menu_open:
+            self._glow.setEnabled(True)
+        else:
+            still_inside = self.rect().contains(self.mapFromGlobal(QCursor.pos()))
+            self._glow.setEnabled(still_inside)
+
+    def exec_menu(self, menu: QMenu, global_pos: QPoint, anchor_btn: QPushButton | None = None):
+        def _on_menu_hide():
+            HistoryRowCard._suppress_next_card_click = True
+            HistoryRowCard._suppress_until = time.monotonic() + 0.20
+            if anchor_btn is not None:
+                if anchor_btn.rect().contains(anchor_btn.mapFromGlobal(QCursor.pos())):
+                    anchor_btn._suppress_reopen_until = time.monotonic() + 0.28
+
+        menu.aboutToHide.connect(_on_menu_hide)
+        self.set_menu_open(True)
+        HistoryRowCard._context_menu_open = True
+        HistoryRowCard._suppress_next_card_click = False
+        chosen = None
+        try:
+            chosen = menu.exec(global_pos)
+        finally:
+            HistoryRowCard._context_menu_open = False
+            self.set_menu_open(False)
+            if chosen is not None:
+                HistoryRowCard._suppress_next_card_click = False
+            else:
+                HistoryRowCard._suppress_next_card_click = True
+                HistoryRowCard._suppress_until = time.monotonic() + 0.20
+        return chosen
+
     def _open_more_platforms_menu(self):
         if not self._all_links or not self.more_btn:
+            return
+        if time.monotonic() < getattr(self.more_btn, "_suppress_reopen_until", 0.0):
+            self.more_btn._suppress_reopen_until = 0.0
+            return
+        if HistoryRowCard.should_suppress_card_click():
             return
         menu = ScrollThroughMenu(self._scroll_area, self.more_btn)
         for pname, icon_key, url in self._all_links:
             act = QAction(self._p_icons.get(icon_key, self._p_icons["web"]), pname, menu)
             act.triggered.connect(lambda checked=False, u=url: open_external_url(u))
             menu.addAction(act)
-        menu.exec(self.more_btn.mapToGlobal(self.more_btn.rect().bottomLeft()))
+        self.exec_menu(
+            menu,
+            self.more_btn.mapToGlobal(self.more_btn.rect().bottomLeft()),
+            anchor_btn=self.more_btn,
+        )
         menu.deleteLater()
 
     def _on_add_playlist_clicked(self):
+        if time.monotonic() < getattr(self.add_pl_btn, "_suppress_reopen_until", 0.0):
+            self.add_pl_btn._suppress_reopen_until = 0.0
+            return
         if HistoryRowCard.should_suppress_card_click():
             return
         if self._on_playlist_menu is not None:
-            self._on_playlist_menu(self._song_id, self.add_pl_btn)
+            self._on_playlist_menu(self._song_id, self.add_pl_btn, self)
 
     def set_liked(self, liked: bool, animate: bool = False):
         liked = bool(liked)
@@ -1261,7 +1331,7 @@ class HistoryRowCard(QFrame):
             self.add_pl_btn.setFixedSize(28, 28)
         else:
             self.play_pref_btn.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
-            self.play_pref_btn.setText("Play on ")
+            self.play_pref_btn.setText("Listen in ")
             self.play_pref_btn.setMinimumSize(0, 28)
             self.play_pref_btn.setMaximumSize(16777215, 28)
             if self.more_btn:
@@ -1356,7 +1426,8 @@ class HistoryRowCard(QFrame):
         super().enterEvent(event)
 
     def leaveEvent(self, event):
-        self._glow.setEnabled(False)
+        if not self._menu_open:
+            self._glow.setEnabled(False)
         super().leaveEvent(event)
 
 
@@ -2382,7 +2453,7 @@ class SubtleStatusHUD(QWidget):
         self.show()
         set_window_always_on_top(int(self.winId()), True)
         if auto_hide_ms > 0:
-            self.hide_timer.start(auto_hide_ms)
+            self.hide_timer.start(int(auto_hide_ms) + 2000)
 
 
 class SongResultPopup(QWidget):

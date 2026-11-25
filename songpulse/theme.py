@@ -1,3 +1,4 @@
+import hashlib
 import io
 import os
 import re
@@ -169,6 +170,78 @@ def ensure_chevron_icons():
     return paths
 
 
+def _ensure_checkbox_icons(dark: bool, accent: str, ac_text: str) -> dict[str, str]:
+    """Generates anti-aliased 18x18 checkbox PNGs so Qt6 never renders white corner artifacts."""
+    sig = hashlib.md5(f"{int(dark)}:{accent.lower()}:{ac_text.lower()}".encode()).hexdigest()[:8]
+    mode = "dark" if dark else "light"
+    names = ("unchecked", "unchecked_hover", "checked", "unchecked_disabled", "checked_disabled")
+    out: dict[str, str] = {}
+
+    rect = QRectF(1.5, 1.5, 15.0, 15.0)
+    ac_col = QColor(accent)
+    chk_col = QColor(ac_text)
+
+    fill_idle = QColor(255, 255, 255, 16) if dark else QColor("#F8FAFC")
+    border_idle = QColor("#71717A") if dark else QColor("#94A3B8")
+    fill_dis = QColor(255, 255, 255, 10) if dark else QColor("#E2E8F0")
+    border_dis = QColor("#52525B") if dark else QColor("#CBD5E1")
+    muted_ac = QColor(
+        int(round(ac_col.red() * 0.45 + 100 * 0.55)),
+        int(round(ac_col.green() * 0.45 + 116 * 0.55)),
+        int(round(ac_col.blue() * 0.45 + 139 * 0.55)),
+        155,
+    )
+    muted_chk = QColor(chk_col.red(), chk_col.green(), chk_col.blue(), 175)
+
+    for state in names:
+        fname = f"chk_{mode}_{sig}_{state}.png"
+        fpath = os.path.join(ICONS_DIR, fname)
+        out[state] = fpath.replace("\\", "/")
+        if os.path.isfile(fpath):
+            continue
+
+        pix = QPixmap(18, 18)
+        pix.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        if state == "unchecked":
+            p.setBrush(QBrush(fill_idle))
+            p.setPen(QPen(border_idle, 1.5))
+            p.drawRoundedRect(rect, 4.0, 4.0)
+        elif state == "unchecked_hover":
+            p.setBrush(QBrush(fill_idle))
+            p.setPen(QPen(ac_col, 1.5))
+            p.drawRoundedRect(rect, 4.0, 4.0)
+        elif state == "unchecked_disabled":
+            p.setBrush(QBrush(fill_dis))
+            p.setPen(QPen(border_dis, 1.5))
+            p.drawRoundedRect(rect, 4.0, 4.0)
+        elif state in ("checked", "checked_disabled"):
+            bg = ac_col if state == "checked" else muted_ac
+            fg = chk_col if state == "checked" else muted_chk
+            p.setBrush(QBrush(bg))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawRoundedRect(rect, 4.2, 4.2)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(
+                QPen(
+                    fg,
+                    2.0,
+                    Qt.PenStyle.SolidLine,
+                    Qt.PenCapStyle.RoundCap,
+                    Qt.PenJoinStyle.RoundJoin,
+                )
+            )
+            p.drawPolyline(
+                QPolygonF([QPointF(4.6, 9.2), QPointF(7.8, 12.4), QPointF(13.4, 5.8)])
+            )
+        p.end()
+        pix.save(fpath, "PNG")
+
+    return out
+
+
 def create_ui_icon(kind: str, color_hex="#E4E4E7", size=16):
     pix = QPixmap(size, size)
     pix.fill(Qt.GlobalColor.transparent)
@@ -267,16 +340,16 @@ def create_ui_icon(kind: str, color_hex="#E4E4E7", size=16):
         )
     elif kind in ("heart", "heart_filled"):
         path = QPainterPath()
-        path.moveTo(s * 0.50, s * 0.88)
-        path.cubicTo(s * 0.08, s * 0.60, s * 0.06, s * 0.16, s * 0.30, s * 0.14)
-        path.cubicTo(s * 0.43, s * 0.13, s * 0.50, s * 0.25, s * 0.50, s * 0.30)
-        path.cubicTo(s * 0.50, s * 0.25, s * 0.57, s * 0.13, s * 0.70, s * 0.14)
-        path.cubicTo(s * 0.94, s * 0.16, s * 0.92, s * 0.60, s * 0.50, s * 0.88)
+        path.moveTo(s * 0.50, s * 0.87)
+        path.cubicTo(s * 0.06, s * 0.62, s * 0.02, s * 0.20, s * 0.27, s * 0.14)
+        path.cubicTo(s * 0.41, s * 0.11, s * 0.48, s * 0.21, s * 0.50, s * 0.26)
+        path.cubicTo(s * 0.52, s * 0.21, s * 0.59, s * 0.11, s * 0.73, s * 0.14)
+        path.cubicTo(s * 0.98, s * 0.20, s * 0.94, s * 0.62, s * 0.50, s * 0.87)
         if kind == "heart_filled":
             p.setBrush(QBrush(QColor(color_hex)))
             p.setPen(Qt.PenStyle.NoPen)
         else:
-            pen.setWidthF(max(1.6, s * 0.115))
+            pen.setWidthF(max(1.7, s * 0.12))
             p.setPen(pen)
         p.drawPath(path)
     elif kind == "close":
@@ -854,7 +927,7 @@ def build_stylesheet(dark: bool, chevrons: dict, theme_cfg: dict | None = None, 
 
     ac_col = QColor(accent)
     ac_text = "#0B1220" if _perceived_luminance((ac_col.red(), ac_col.green(), ac_col.blue())) > 175 else "#FFFFFF"
-    chk_img = chevrons["check_dark.png"] if ac_text == "#0B1220" else chevrons["check_white.png"]
+    chk_icons = _ensure_checkbox_icons(dark, accent, ac_text)
 
     qss = f"""
 QMainWindow {{
@@ -957,7 +1030,7 @@ QFrame#SongCard {{
     border: 1px solid {c['card_b']};
     border-radius: 14px;
 }}
-QFrame#SongCard:hover {{
+QFrame#SongCard:hover, QFrame#SongCard[menuOpen="true"] {{
     background-color: {c['song_hover_bg']};
     border: 1px solid {c['song_hover_b']};
 }}
@@ -1116,6 +1189,19 @@ QPushButton#DangerBtn {{
 QPushButton#DangerBtn:hover {{
     background-color: {c['danger_hover']};
 }}
+QPushButton#ToolbarBtn {{
+    background-color: {c['btn_bg']};
+    color: {c['btn_fg']};
+    border: 1px solid {c['btn_b']};
+    border-radius: 8px;
+    padding: 7px 12px;
+    font-size: 12px;
+    font-weight: 600;
+}}
+QPushButton#ToolbarBtn:hover {{
+    background-color: {c['btn_hover']};
+    border-color: {accent};
+}}
 QPushButton#IconDangerBtn {{
     background-color: transparent;
     color: {c['danger_fg']};
@@ -1262,24 +1348,27 @@ QCheckBox {{
     spacing: 8px;
     font-size: 12px;
 }}
+QCheckBox:disabled {{
+    color: {c['muted']};
+}}
 QCheckBox::indicator {{
-    width: 16px;
-    height: 16px;
-    border-radius: 4px;
-    background-color: {'rgba(255, 255, 255, 0.06)' if dark else '#F8FAFC'};
-    border: 1.5px solid {'rgba(255, 255, 255, 0.34)' if dark else '#94A3B8'};
+    width: 18px;
+    height: 18px;
+    border: none;
+    background: transparent;
+    image: url("{chk_icons['unchecked']}");
 }}
 QCheckBox::indicator:hover {{
-    border-color: {accent};
+    image: url("{chk_icons['unchecked_hover']}");
 }}
 QCheckBox::indicator:checked {{
-    background-color: {accent};
-    border: 1.5px solid {accent};
-    image: url("{chk_img}");
+    image: url("{chk_icons['checked']}");
 }}
 QCheckBox::indicator:disabled {{
-    background-color: {'rgba(255, 255, 255, 0.03)' if dark else '#E2E8F0'};
-    border-color: {'rgba(255, 255, 255, 0.14)' if dark else '#CBD5E1'};
+    image: url("{chk_icons['unchecked_disabled']}");
+}}
+QCheckBox::indicator:checked:disabled {{
+    image: url("{chk_icons['checked_disabled']}");
 }}
 QRadioButton {{
     color: {c['fg']};
