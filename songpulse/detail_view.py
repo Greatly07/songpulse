@@ -56,7 +56,7 @@ from .theme import (
     extract_cover_gradient_colors,
     rounded_pixmap,
 )
-from .widgets import ElidedLabel, ElidedLinkButton, FlowWidget, get_song_link
+from .widgets import AnimatedLikeButton, ElidedLabel, ElidedLinkButton, FlowWidget, get_song_link
 from .workers import (
     AlbumInfoWorker,
     ArtistInfoWorker,
@@ -713,8 +713,8 @@ class SongDetailPage(QWidget):
         self.back_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.back_btn.clicked.connect(self._on_back)
 
-        self.like_btn = QPushButton("♡  Like")
-        self.like_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.like_btn = AnimatedLikeButton(liked=False, icon_px=18.0, show_label=True)
+        self.like_btn.setProperty("_dynamic_qss", True)
         self.like_btn.clicked.connect(self._on_like_clicked)
 
         self.ytdlp_btn = QPushButton(" Download with yt-dlp")
@@ -932,7 +932,7 @@ class SongDetailPage(QWidget):
         self.popup_kicker = QLabel("ARTIST")
         self.popup_source_lbl = QLabel("")
         self.popup_source_lbl.hide()
-        self.popup_close_btn = QPushButton("✕")
+        self.popup_close_btn = QPushButton("")
         self.popup_close_btn.setFixedSize(26, 26)
         self.popup_close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.popup_close_btn.clicked.connect(self._close_info_popup)
@@ -1083,10 +1083,12 @@ class SongDetailPage(QWidget):
             f"QPushButton:hover {{ background-color: {btn_hover}; border-color: {ac}; }}"
         )
         self.popup_close_btn.setProperty("_base_qss", None)
+        self.popup_close_btn.setIcon(create_ui_icon("close", muted, 13))
+        self.popup_close_btn.setIconSize(QSize(13, 13))
         self.popup_close_btn.setStyleSheet(
             f"QPushButton {{ background-color: {btn_bg}; color: {muted}; border: 1px solid {btn_b}; "
-            f"border-radius: 7px; padding: 0px; font-size: 12px; font-weight: 700; }}"
-            f"QPushButton:hover {{ color: #F87171; border-color: #F87171; }}"
+            f"border-radius: 10px; padding: 0px; }}"
+            f"QPushButton:hover {{ border-color: #F87171; background-color: rgba(239, 68, 68, 0.14); }}"
         )
         self.popup_kicker.setProperty("_base_qss", None)
         self.popup_kicker.setStyleSheet(
@@ -1177,9 +1179,9 @@ class SongDetailPage(QWidget):
             return artists
         return split_artists(s.get("artist", ""), s.get("shazam_artists"))
 
-    def _sync_like_btn(self):
+    def _sync_like_btn(self, animate: bool = False):
         liked = bool((self.song or {}).get("liked", False))
-        self.like_btn.setText("♥  Liked" if liked else "♡  Like")
+        self.like_btn.set_liked(liked, animate=animate)
         if liked:
             self.like_btn.setStyleSheet(
                 self._glass_btn_qss + " QPushButton { color: #F43F5E; border-color: rgba(244,63,94,0.45); }"
@@ -1191,7 +1193,7 @@ class SongDetailPage(QWidget):
         if not self.song:
             return
         self.song["liked"] = not bool(self.song.get("liked", False))
-        self._sync_like_btn()
+        self._sync_like_btn(animate=True)
         self.like_toggled.emit(self.song.get("id", ""))
 
     def _render_song_fields(self):

@@ -3,7 +3,7 @@ import os
 import shutil
 import webbrowser
 
-from PyQt6.QtCore import QEvent, QObject, QRectF, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QEvent, QObject, QRectF, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QCursor, QFontMetrics, QPainter, QPainterPath, QPalette, QPen
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -45,6 +45,7 @@ from .themes_manager import (
     resolve_theme_image_path,
     save_custom_theme,
 )
+from .theme import create_ui_icon
 from .waveforms import resolve_template_waveform
 from .widgets import ElidedLabel, NoWheelComboBox, NoWheelSpinBox, _paint_surface
 from .workers import GithubPresetsCatalogWorker, GithubPresetsInstallWorker
@@ -1024,8 +1025,10 @@ class CustomThemeDialog(QDialog):
         br_btn = QPushButton("Browse")
         br_btn.setObjectName("PlatformBtn")
         br_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        clr_btn = QPushButton("✕")
+        clr_btn = QPushButton("")
         clr_btn.setObjectName("IconDangerBtn")
+        clr_btn.setIcon(create_ui_icon("close", "#F87171", 12))
+        clr_btn.setIconSize(QSize(12, 12))
         clr_btn.setFixedSize(24, 24)
         clr_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         set_delayed_tooltip(clr_btn, "Remove selected photo")

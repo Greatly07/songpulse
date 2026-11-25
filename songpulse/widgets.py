@@ -3,6 +3,7 @@ import ctypes.wintypes
 import math
 import os
 import time
+import weakref
 import webbrowser
 
 from PyQt6.QtCore import (
@@ -51,6 +52,9 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
     QSlider,
     QSpinBox,
+    QStyle,
+    QStyleOptionButton,
+    QStylePainter,
     QVBoxLayout,
     QWidget,
 )
@@ -719,16 +723,39 @@ class ScrollThroughMenu(QMenu):
             return
         super().wheelEvent(event)
 
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            act = self.actionAt(event.position().toPoint())
+            if act is not None and act.isEnabled() and act.property("keep_open"):
+                act.trigger()
+                self.update()
+                event.accept()
+                return
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+            act = self.activeAction()
+            if act is not None and act.isEnabled() and act.property("keep_open"):
+                act.trigger()
+                self.update()
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
 
 class _CheckboxHitArea(QWidget):
-    """Expands clickable hitbox around a small QCheckBox without enlarging the visual box."""
+    """Expands clickable hitbox across the full left bar of a song card without enlarging the box."""
 
     def __init__(self, checkbox: QCheckBox, parent=None):
         super().__init__(parent)
         self.chk = checkbox
-        self.setFixedSize(36, 48)
+        self.setObjectName("CheckboxHitArea")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setFixedWidth(44)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setStyleSheet("background: transparent; border: none;")
+        self.chk.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -753,6 +780,221 @@ class _CheckboxHitArea(QWidget):
             event.accept()
             return
         super().mouseReleaseEvent(event)
+
+
+class AnimatedLikeButton(QPushButton):
+    """Lightweight vector heart button with YouTube Shorts-style spring & spark animation using 1 shared timer."""
+
+    _HEART_PATH: QPainterPath | None = None
+    _ANIM_TIMER: QTimer | None = None
+    _ACTIVE: weakref.WeakSet = weakref.WeakSet()
+    _SPARK_SPECS = tuple(
+        (
+            math.cos(math.radians(deg)),
+            math.sin(math.radians(deg)),
+            dist,
+            rad,
+            QColor(col),
+        )
+        for deg, dist, rad, col in (
+            (-90.0, 0.80, 1.9, "#F43F5E"),
+            (-38.0, 0.84, 1.6, "#FB7185"),
+            (15.0, 0.78, 1.8, "#FBBF24"),
+            (65.0, 0.82, 1.5, "#FDA4AF"),
+            (115.0, 0.82, 1.5, "#FB7185"),
+            (165.0, 0.78, 1.8, "#FBBF24"),
+            (218.0, 0.84, 1.6, "#FDA4AF"),
+        )
+    )
+
+    @classmethod
+    def _get_heart_path(cls) -> QPainterPath:
+        if cls._HEART_PATH is None:
+            p = QPainterPath()
+            p.moveTo(0.0, 0.42)
+            p.cubicTo(-0.48, 0.12, -0.50, -0.36, -0.24, -0.38)
+            p.cubicTo(-0.08, -0.39, 0.0, -0.24, 0.0, -0.18)
+            p.cubicTo(0.0, -0.24, 0.08, -0.39, 0.24, -0.38)
+            p.cubicTo(0.50, -0.36, 0.48, 0.12, 0.0, 0.42)
+            cls._HEART_PATH = p
+        return cls._HEART_PATH
+
+    @classmethod
+    def _ensure_timer(cls):
+        if cls._ANIM_TIMER is None:
+            t = QTimer()
+            t.setInterval(16)
+            t.timeout.connect(cls._tick_all)
+            cls._ANIM_TIMER = t
+        if not cls._ANIM_TIMER.isActive():
+            cls._ANIM_TIMER.start()
+
+    @classmethod
+    def _tick_all(cls):
+        now = time.monotonic()
+        done = []
+        for btn in list(cls._ACTIVE):
+            try:
+                elapsed = max(0.0, now - btn._anim_start)
+                t = min(1.0, elapsed / max(0.05, btn._anim_dur))
+                btn._anim_t = t
+                btn.update()
+                if t >= 1.0:
+                    btn._anim_mode = 0
+                    done.append(btn)
+            except RuntimeError:
+                done.append(btn)
+        for btn in done:
+            cls._ACTIVE.discard(btn)
+        if not cls._ACTIVE and cls._ANIM_TIMER is not None and cls._ANIM_TIMER.isActive():
+            cls._ANIM_TIMER.stop()
+
+    def __init__(self, liked: bool = False, icon_px: float = 20.0, show_label: bool = False, parent=None):
+        super().__init__(parent)
+        self._liked = bool(liked)
+        self._icon_px = float(icon_px)
+        self._show_label = bool(show_label)
+        self._anim_t = 1.0
+        self._anim_mode = 0  # 0 = idle, 1 = like burst, -1 = unlike settle
+        self._anim_start = 0.0
+        self._anim_dur = 0.34
+
+        if not self._show_label:
+            self.setObjectName("SubtleIconBtn")
+            self.setFixedSize(38, 38)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setToolTip("Remove from Liked Songs" if self._liked else "Add to Liked Songs")
+
+    def set_liked(self, liked: bool, animate: bool = False):
+        self._liked = bool(liked)
+        self.setToolTip("Remove from Liked Songs" if self._liked else "Add to Liked Songs")
+        if self._show_label:
+            self.updateGeometry()
+        if animate:
+            self._anim_mode = 1 if self._liked else -1
+            self._anim_dur = 0.34 if self._liked else 0.14
+            self._anim_start = time.monotonic()
+            self._anim_t = 0.0
+            AnimatedLikeButton._ACTIVE.add(self)
+            AnimatedLikeButton._ensure_timer()
+        else:
+            self._anim_mode = 0
+            self._anim_t = 1.0
+        self.update()
+
+    def sizeHint(self) -> QSize:
+        if not self._show_label:
+            return super().sizeHint()
+        fm = QFontMetrics(self.font())
+        txt = "Liked" if self._liked else "Like"
+        w = 12 + int(round(self._icon_px)) + 7 + fm.horizontalAdvance(txt) + 12
+        h = max(32, fm.height() + 12)
+        return QSize(w, h)
+
+    def minimumSizeHint(self) -> QSize:
+        return self.sizeHint() if self._show_label else super().minimumSizeHint()
+
+    def _heart_scale(self) -> float:
+        if self._anim_mode == 1:
+            t = self._anim_t
+            if t < 0.14:
+                u = t / 0.14
+                return 1.0 - 0.28 * u
+            if t < 0.48:
+                u = (t - 0.14) / 0.34
+                return 0.72 + 0.60 * (1.0 - (1.0 - u) ** 2)
+            if t < 0.76:
+                u = (t - 0.48) / 0.28
+                return 1.32 - 0.38 * u
+            u = (t - 0.76) / 0.24
+            return 0.94 + 0.06 * u
+        if self._anim_mode == -1:
+            return 0.84 + 0.16 * self._anim_t
+        return 1.0
+
+    def paintEvent(self, event):
+        sp = QStylePainter(self)
+        opt = QStyleOptionButton()
+        self.initStyleOption(opt)
+        opt.text = ""
+        sp.drawControl(QStyle.ControlElement.CE_PushButtonBevel, opt)
+        sp.end()
+
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        if self._show_label:
+            cx = 12.0 + self._icon_px / 2.0
+            cy = self.height() / 2.0
+        else:
+            cx = self.width() / 2.0
+            cy = self.height() / 2.0
+
+        # Expanding ring + radial spark dots during like burst
+        if self._anim_mode == 1:
+            t = self._anim_t
+            if 0.08 <= t <= 0.72:
+                rt = (t - 0.08) / 0.64
+                ring_r = self._icon_px * (0.42 + 0.44 * rt)
+                ring_a = int(175 * (1.0 - rt))
+                if ring_a > 2:
+                    p.setPen(QPen(QColor(244, 63, 94, ring_a), max(1.2, 2.0 * (1.0 - rt))))
+                    p.setBrush(Qt.BrushStyle.NoBrush)
+                    p.drawEllipse(QPointF(cx, cy), ring_r, ring_r)
+            if 0.12 <= t <= 0.94:
+                st = (t - 0.12) / 0.82
+                ease = 1.0 - (1.0 - st) ** 2
+                alpha = int(235 * (1.0 - st))
+                if alpha > 2:
+                    p.setPen(Qt.PenStyle.NoPen)
+                    max_r = min(16.5, self._icon_px * 0.84)
+                    for dx, dy, dist_m, dot_r, col in self._SPARK_SPECS:
+                        r = dist_m * max_r * ease
+                        c = QColor(col)
+                        c.setAlpha(alpha)
+                        p.setBrush(QBrush(c))
+                        dr = dot_r * (1.0 - 0.4 * st)
+                        p.drawEllipse(QPointF(cx + dx * r, cy + dy * r), dr, dr)
+
+        sc = self._heart_scale()
+        p.save()
+        p.translate(cx, cy)
+        draw_scale = max(0.1, self._icon_px * sc)
+        p.scale(draw_scale, draw_scale)
+        heart = self._get_heart_path()
+        if self._liked:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(QColor("#F43F5E")))
+        else:
+            col = opt.palette.color(opt.palette.ColorRole.ButtonText)
+            if not self.underMouse():
+                col.setAlpha(185)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(
+                QPen(
+                    col,
+                    1.8 / draw_scale,
+                    Qt.PenStyle.SolidLine,
+                    Qt.PenCapStyle.RoundCap,
+                    Qt.PenJoinStyle.RoundJoin,
+                )
+            )
+        p.drawPath(heart)
+        p.restore()
+
+        if self._show_label:
+            txt = "Liked" if self._liked else "Like"
+            txt_col = QColor("#F43F5E") if self._liked else opt.palette.color(opt.palette.ColorRole.ButtonText)
+            p.setPen(txt_col)
+            text_x = int(round(12.0 + self._icon_px + 7.0))
+            p.drawText(
+                QRect(text_x, 0, max(10, self.width() - text_x - 8), self.height()),
+                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                txt,
+            )
+
+        p.end()
 
 
 class HistoryRowCard(QFrame):
@@ -782,13 +1024,17 @@ class HistoryRowCard(QFrame):
         self,
         song,
         p_icons,
-        details_icon,
+        preferred_target,
+        playlist_icon,
+        close_icon,
         on_details,
         on_delete,
+        on_playlist_menu=None,
         checked=False,
         allow_reorder=False,
         delete_tooltip="Remove from library",
         initial_compact=False,
+        scroll_area=None,
         parent=None,
     ):
         super().__init__(parent)
@@ -803,11 +1049,13 @@ class HistoryRowCard(QFrame):
         self._glow.setEnabled(False)
         self.setGraphicsEffect(self._glow)
         self._compact = None
-        self._link_btns = []
 
         self._song = song
         self._song_id = song.get("id", "")
+        self._p_icons = p_icons
+        self._scroll_area = scroll_area
         self._on_details = on_details
+        self._on_playlist_menu = on_playlist_menu
         self._allow_reorder = bool(allow_reorder)
         self._drag_start_pos = None
         self._right_press_pos = None
@@ -816,10 +1064,10 @@ class HistoryRowCard(QFrame):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
         row = QHBoxLayout(self)
-        row.setContentsMargins(6, 7, 10, 7)
-        row.setSpacing(6)
+        row.setContentsMargins(0, 0, 10, 0)
+        row.setSpacing(0)
 
-        # Selection checkbox
+        # Selection checkbox spanning the entire left bar up to the song cover
         self.select_chk = QCheckBox()
         self.select_chk.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.select_chk.setChecked(checked)
@@ -833,6 +1081,10 @@ class HistoryRowCard(QFrame):
         )
         self._chk_hit = _CheckboxHitArea(self.select_chk)
         row.addWidget(self._chk_hit)
+
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 7, 0, 7)
+        body.setSpacing(6)
 
         # Optional manual reorder handle (up/down) for custom playlists
         if self._allow_reorder:
@@ -855,12 +1107,12 @@ class HistoryRowCard(QFrame):
 
             mv_col.addWidget(up_btn)
             mv_col.addWidget(dn_btn)
-            row.addLayout(mv_col)
+            body.addLayout(mv_col)
 
         cover = QLabel()
         cover.setFixedSize(46, 46)
         cover.setPixmap(rounded_pixmap(song.get("cover_path", ""), 46, 8))
-        row.addWidget(cover)
+        body.addWidget(cover)
 
         text_col = QVBoxLayout()
         text_col.setSpacing(2)
@@ -900,82 +1152,84 @@ class HistoryRowCard(QFrame):
         text_col.addWidget(t_lbl)
         text_col.addWidget(sub_lbl)
         text_col.addWidget(ts_lbl)
-        row.addLayout(text_col, 1)
+        body.addLayout(text_col, 1)
 
-        # Like heart button
+        # Like heart button (larger vector icon + 38x38 hitbox + YouTube Shorts-style bounce)
         liked = bool(song.get("liked", False))
-        self.like_btn = QPushButton("♥" if liked else "♡")
-        self.like_btn.setObjectName("SubtleIconBtn")
-        self.like_btn.setFixedSize(28, 28)
-        self.like_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.like_btn.setToolTip("Remove from Liked Songs" if liked else "Add to Liked Songs")
-        if liked:
-            self.like_btn.setStyleSheet("color: #F43F5E; font-size: 15px;")
-        else:
-            self.like_btn.setStyleSheet("font-size: 15px;")
+        self.like_btn = AnimatedLikeButton(liked=liked, icon_px=20.0, show_label=False)
         self.like_btn.clicked.connect(lambda: self.like_toggled.emit(self._song_id))
-        row.addWidget(self.like_btn)
+        body.addWidget(self.like_btn)
 
-        all_links = build_song_platform_links(song)
-        for pname, icon_key, url in all_links[:2]:
-            b = QPushButton(pname)
-            b.setObjectName("PlatformBtn")
-            b.setIcon(p_icons.get(icon_key, p_icons["web"]))
-            b.setIconSize(QSize(13, 13))
-            b.setToolTip(f"Open on {pname}")
-            b.setCursor(Qt.CursorShape.PointingHandCursor)
-            b.clicked.connect(lambda checked=False, u=url: open_external_url(u))
-            row.addWidget(b)
-            self._link_btns.append((b, pname))
+        # Preferred music site quick play button ("Play on [icon]" / "[icon]" when narrow)
+        pref_label, pref_icon_key, pref_url = preferred_target
+        self._pref_label = pref_label
+        self.play_pref_btn = QPushButton("Play on ")
+        self.play_pref_btn.setObjectName("PlatformBtn")
+        self.play_pref_btn.setIcon(p_icons.get(pref_icon_key, p_icons["web"]))
+        self.play_pref_btn.setIconSize(QSize(15, 15))
+        self.play_pref_btn.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        self.play_pref_btn.setToolTip(f"Play on {pref_label}")
+        self.play_pref_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.play_pref_btn.clicked.connect(
+            lambda checked=False, u=pref_url: open_external_url(u) if u else None
+        )
+        body.addWidget(self.play_pref_btn)
 
+        # More music platforms dropdown (includes Shazam & YouTube; built lazily on click)
+        self._all_links = build_song_platform_links(song)
         self.more_btn = None
-        if len(all_links) > 2:
+        if self._all_links:
             self.more_btn = QPushButton("More ▾")
             self.more_btn.setObjectName("PlatformBtn")
             self.more_btn.setToolTip("More music platforms")
             self.more_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            m = QMenu(self.more_btn)
-            for pname, icon_key, url in all_links[2:]:
-                act = QAction(p_icons.get(icon_key, p_icons["web"]), pname, m)
-                act.triggered.connect(lambda checked=False, u=url: open_external_url(u))
-                m.addAction(act)
-            self.more_btn.setMenu(m)
-            row.addWidget(self.more_btn)
+            self.more_btn.clicked.connect(self._open_more_platforms_menu)
+            body.addWidget(self.more_btn)
 
-        self.details_btn = QPushButton("Details")
-        self.details_btn.setObjectName("PlatformBtn")
-        self.details_btn.setIcon(details_icon)
-        self.details_btn.setIconSize(QSize(13, 13))
-        self.details_btn.setToolTip("View song details")
-        self.details_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.details_btn.clicked.connect(
-            lambda checked=False: None
-            if HistoryRowCard.should_suppress_card_click()
-            else on_details(song)
-        )
-        row.addWidget(self.details_btn)
+        # 1-click Add to Playlist button (replaces redundant Details button)
+        self.add_pl_btn = QPushButton("Playlist")
+        self.add_pl_btn.setObjectName("PlatformBtn")
+        self.add_pl_btn.setIcon(playlist_icon)
+        self.add_pl_btn.setIconSize(QSize(14, 14))
+        self.add_pl_btn.setToolTip("Add to playlist")
+        self.add_pl_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.add_pl_btn.clicked.connect(self._on_add_playlist_clicked)
+        body.addWidget(self.add_pl_btn)
 
-        del_btn = QPushButton("✕")
-        del_btn.setObjectName("IconDangerBtn")
-        del_btn.setFixedSize(28, 28)
-        del_btn.setToolTip(delete_tooltip)
-        del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        del_btn.clicked.connect(lambda checked=False: on_delete(self._song_id))
-        row.addWidget(del_btn)
+        self.del_btn = QPushButton("")
+        self.del_btn.setObjectName("IconDangerBtn")
+        self.del_btn.setIcon(close_icon)
+        self.del_btn.setIconSize(QSize(13, 13))
+        self.del_btn.setFixedSize(28, 28)
+        self.del_btn.setToolTip(delete_tooltip)
+        self.del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.del_btn.clicked.connect(lambda checked=False: on_delete(self._song_id))
+        body.addWidget(self.del_btn)
 
+        row.addLayout(body, 1)
         self._apply_compact_mode(bool(initial_compact))
 
-    def set_liked(self, liked: bool):
+    def _open_more_platforms_menu(self):
+        if not self._all_links or not self.more_btn:
+            return
+        menu = ScrollThroughMenu(self._scroll_area, self.more_btn)
+        for pname, icon_key, url in self._all_links:
+            act = QAction(self._p_icons.get(icon_key, self._p_icons["web"]), pname, menu)
+            act.triggered.connect(lambda checked=False, u=url: open_external_url(u))
+            menu.addAction(act)
+        menu.exec(self.more_btn.mapToGlobal(self.more_btn.rect().bottomLeft()))
+        menu.deleteLater()
+
+    def _on_add_playlist_clicked(self):
+        if HistoryRowCard.should_suppress_card_click():
+            return
+        if self._on_playlist_menu is not None:
+            self._on_playlist_menu(self._song_id, self.add_pl_btn)
+
+    def set_liked(self, liked: bool, animate: bool = False):
         liked = bool(liked)
         self._song["liked"] = liked
-        self.like_btn.setText("♥" if liked else "♡")
-        self.like_btn.setToolTip(
-            "Remove from Liked Songs" if liked else "Add to Liked Songs"
-        )
-        if liked:
-            self.like_btn.setStyleSheet("color: #F43F5E; font-size: 15px;")
-        else:
-            self.like_btn.setStyleSheet("font-size: 15px;")
+        self.like_btn.set_liked(liked, animate=animate)
 
     def set_checked_silent(self, checked: bool):
         self.select_chk.blockSignals(True)
@@ -986,10 +1240,10 @@ class HistoryRowCard(QFrame):
         super().resizeEvent(event)
         w = self.width()
         if self._compact is None:
-            self._apply_compact_mode(w < 680)
-        elif self._compact and w > 696:
+            self._apply_compact_mode(w < 550)
+        elif self._compact and w > 568:
             self._apply_compact_mode(False)
-        elif not self._compact and w < 664:
+        elif not self._compact and w < 536:
             self._apply_compact_mode(True)
 
     def _apply_compact_mode(self, compact: bool):
@@ -997,26 +1251,26 @@ class HistoryRowCard(QFrame):
             return
         self._compact = compact
         if compact:
-            for b, _name in self._link_btns:
-                b.setText("")
-                b.setFixedSize(28, 28)
+            self.play_pref_btn.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
+            self.play_pref_btn.setText("")
+            self.play_pref_btn.setFixedSize(28, 28)
             if self.more_btn:
                 self.more_btn.setText("⋯")
                 self.more_btn.setFixedSize(28, 28)
-            self.details_btn.setText("")
-            self.details_btn.setFixedSize(28, 28)
+            self.add_pl_btn.setText("")
+            self.add_pl_btn.setFixedSize(28, 28)
         else:
-            for b, name in self._link_btns:
-                b.setText(name)
-                b.setMinimumSize(0, 28)
-                b.setMaximumSize(16777215, 28)
+            self.play_pref_btn.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+            self.play_pref_btn.setText("Play on ")
+            self.play_pref_btn.setMinimumSize(0, 28)
+            self.play_pref_btn.setMaximumSize(16777215, 28)
             if self.more_btn:
                 self.more_btn.setText("More ▾")
                 self.more_btn.setMinimumSize(0, 28)
                 self.more_btn.setMaximumSize(16777215, 28)
-            self.details_btn.setText("Details")
-            self.details_btn.setMinimumSize(0, 28)
-            self.details_btn.setMaximumSize(16777215, 28)
+            self.add_pl_btn.setText("Playlist")
+            self.add_pl_btn.setMinimumSize(0, 28)
+            self.add_pl_btn.setMaximumSize(16777215, 28)
 
     def _emit_context_menu(self, global_pos: QPoint):
         now = time.monotonic()
@@ -1836,8 +2090,10 @@ class AudioOutputListWidget(QWidget):
                 )
                 rl.addWidget(tag)
 
-            del_btn = QPushButton("✕")
+            del_btn = QPushButton("")
             del_btn.setObjectName("IconDangerBtn")
+            del_btn.setIcon(create_ui_icon("close", "#F87171", 12))
+            del_btn.setIconSize(QSize(12, 12))
             del_btn.setFixedSize(24, 24)
             del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             del_btn.setToolTip(f"Remove '{name}' from remembered outputs")
@@ -2172,8 +2428,8 @@ class SongResultPopup(QWidget):
         head_row.setSpacing(6)
         self.kicker = QLabel("SONG FOUND")
         self.kicker.setStyleSheet("font-size: 10px; font-weight: 700; color: #3B82F6;")
-        self.close_btn = QPushButton("✕")
-        self.close_btn.setFixedSize(20, 20)
+        self.close_btn = QPushButton("")
+        self.close_btn.setFixedSize(22, 22)
         self.close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.close_btn.clicked.connect(self.hide)
         head_row.addWidget(self.kicker)
@@ -2221,9 +2477,11 @@ class SongResultPopup(QWidget):
         self.kicker.setStyleSheet(
             f"font-size: 10px; font-weight: 700; color: {tok['accent']}; background: transparent;"
         )
+        self.close_btn.setIcon(create_ui_icon("close", tok["sub_fg"], 12))
+        self.close_btn.setIconSize(QSize(12, 12))
         self.close_btn.setStyleSheet(
-            f"QPushButton {{ background: transparent; border: none; color: {tok['sub_fg']}; font-size: 12px; }}"
-            f"QPushButton:hover {{ color: {tok['accent']}; }}"
+            "QPushButton { background: transparent; border: none; border-radius: 11px; }"
+            f"QPushButton:hover {{ background: {tok['btn_hover']}; }}"
         )
         self.title_lbl.setStyleSheet(f"color: {tok['fg']}; font-size: 14px; font-weight: 700; background: transparent;")
         self.sub_lbl.setStyleSheet(f"color: {tok['sub_fg']}; font-size: 12px; background: transparent;")

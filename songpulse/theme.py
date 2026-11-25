@@ -145,6 +145,27 @@ def ensure_chevron_icons():
         p.end()
         pix.save(fpath, "PNG")
         paths[fname] = fpath.replace("\\", "/")
+
+    for fname, color in (("check_white.png", "#FFFFFF"), ("check_dark.png", "#0B1220")):
+        fpath = os.path.join(ICONS_DIR, fname)
+        pix = QPixmap(12, 12)
+        pix.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(
+            QColor(color),
+            1.9,
+            Qt.PenStyle.SolidLine,
+            Qt.PenCapStyle.RoundCap,
+            Qt.PenJoinStyle.RoundJoin,
+        )
+        p.setPen(pen)
+        p.drawPolyline(
+            QPolygonF([QPointF(2.5, 6.2), QPointF(5.0, 8.8), QPointF(9.5, 3.4)])
+        )
+        p.end()
+        pix.save(fpath, "PNG")
+        paths[fname] = fpath.replace("\\", "/")
     return paths
 
 
@@ -246,15 +267,29 @@ def create_ui_icon(kind: str, color_hex="#E4E4E7", size=16):
         )
     elif kind in ("heart", "heart_filled"):
         path = QPainterPath()
-        path.moveTo(s * 0.50, s * 0.82)
-        path.cubicTo(s * 0.14, s * 0.58, s * 0.12, s * 0.24, s * 0.32, s * 0.22)
-        path.cubicTo(s * 0.43, s * 0.21, s * 0.50, s * 0.31, s * 0.50, s * 0.35)
-        path.cubicTo(s * 0.50, s * 0.31, s * 0.57, s * 0.21, s * 0.68, s * 0.22)
-        path.cubicTo(s * 0.88, s * 0.24, s * 0.86, s * 0.58, s * 0.50, s * 0.82)
+        path.moveTo(s * 0.50, s * 0.88)
+        path.cubicTo(s * 0.08, s * 0.60, s * 0.06, s * 0.16, s * 0.30, s * 0.14)
+        path.cubicTo(s * 0.43, s * 0.13, s * 0.50, s * 0.25, s * 0.50, s * 0.30)
+        path.cubicTo(s * 0.50, s * 0.25, s * 0.57, s * 0.13, s * 0.70, s * 0.14)
+        path.cubicTo(s * 0.94, s * 0.16, s * 0.92, s * 0.60, s * 0.50, s * 0.88)
         if kind == "heart_filled":
             p.setBrush(QBrush(QColor(color_hex)))
             p.setPen(Qt.PenStyle.NoPen)
+        else:
+            pen.setWidthF(max(1.6, s * 0.115))
+            p.setPen(pen)
         p.drawPath(path)
+    elif kind == "close":
+        c_pen = QPen(
+            QColor(color_hex),
+            max(1.6, s * 0.135),
+            Qt.PenStyle.SolidLine,
+            Qt.PenCapStyle.RoundCap,
+            Qt.PenJoinStyle.RoundJoin,
+        )
+        p.setPen(c_pen)
+        p.drawLine(QPointF(s * 0.26, s * 0.26), QPointF(s * 0.74, s * 0.74))
+        p.drawLine(QPointF(s * 0.74, s * 0.26), QPointF(s * 0.26, s * 0.74))
     elif kind == "download":
         p.drawLine(QPointF(s * 0.50, s * 0.18), QPointF(s * 0.50, s * 0.66))
         p.drawPolyline(
@@ -819,6 +854,7 @@ def build_stylesheet(dark: bool, chevrons: dict, theme_cfg: dict | None = None, 
 
     ac_col = QColor(accent)
     ac_text = "#0B1220" if _perceived_luminance((ac_col.red(), ac_col.green(), ac_col.blue())) > 175 else "#FFFFFF"
+    chk_img = chevrons["check_dark.png"] if ac_text == "#0B1220" else chevrons["check_white.png"]
 
     qss = f"""
 QMainWindow {{
@@ -1083,14 +1119,24 @@ QPushButton#DangerBtn:hover {{
 QPushButton#IconDangerBtn {{
     background-color: transparent;
     color: {c['danger_fg']};
-    border: 1px solid {c['danger_b']};
-    border-radius: 7px;
+    border: 1px solid {'rgba(248, 113, 113, 0.28)' if dark else 'rgba(220, 38, 38, 0.32)'};
+    border-radius: 10px;
     padding: 0px;
     font-size: 12px;
     font-weight: 700;
 }}
 QPushButton#IconDangerBtn:hover {{
     background-color: {c['danger_hover']};
+    border-color: {c['danger_fg']};
+}}
+QWidget#CheckboxHitArea {{
+    background-color: transparent;
+    border: none;
+    border-top-left-radius: 13px;
+    border-bottom-left-radius: 13px;
+}}
+QWidget#CheckboxHitArea:hover {{
+    background-color: {'rgba(255, 255, 255, 0.05)' if dark else 'rgba(59, 130, 246, 0.07)'};
 }}
 QLabel#Muted {{
     color: {c['muted']};
@@ -1102,7 +1148,7 @@ QLabel#MetaChip {{
     padding: 3px 8px;
     font-size: 11px;
 }}
-QLineEdit, QComboBox, QSpinBox {{
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {{
     background-color: {c['inp_bg']};
     color: {c['fg']};
     border: 1px solid {c['inp_b']};
@@ -1110,7 +1156,7 @@ QLineEdit, QComboBox, QSpinBox {{
     padding: 6px 10px;
     font-size: 12px;
 }}
-QLineEdit:focus, QComboBox:focus, QSpinBox:focus {{
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {{
     border-color: {accent};
 }}
 QComboBox {{
@@ -1137,10 +1183,10 @@ QComboBox QAbstractItemView {{
     padding: 4px;
     outline: none;
 }}
-QSpinBox {{
+QSpinBox, QDoubleSpinBox {{
     padding-right: 22px;
 }}
-QSpinBox::up-button {{
+QSpinBox::up-button, QDoubleSpinBox::up-button {{
     subcontrol-origin: border;
     subcontrol-position: top right;
     width: 20px;
@@ -1149,7 +1195,7 @@ QSpinBox::up-button {{
     margin-top: 2px;
     margin-right: 2px;
 }}
-QSpinBox::down-button {{
+QSpinBox::down-button, QDoubleSpinBox::down-button {{
     subcontrol-origin: border;
     subcontrol-position: bottom right;
     width: 20px;
@@ -1158,16 +1204,16 @@ QSpinBox::down-button {{
     margin-bottom: 2px;
     margin-right: 2px;
 }}
-QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
+QSpinBox::up-button:hover, QSpinBox::down-button:hover, QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover {{
     background-color: {c['nav_hover']};
     border-radius: 4px;
 }}
-QSpinBox::up-arrow {{
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
     image: url("{up}");
     width: 10px;
     height: 10px;
 }}
-QSpinBox::down-arrow {{
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
     image: url("{dn}");
     width: 10px;
     height: 10px;
@@ -1215,6 +1261,25 @@ QCheckBox {{
     color: {c['fg']};
     spacing: 8px;
     font-size: 12px;
+}}
+QCheckBox::indicator {{
+    width: 16px;
+    height: 16px;
+    border-radius: 4px;
+    background-color: {'rgba(255, 255, 255, 0.06)' if dark else '#F8FAFC'};
+    border: 1.5px solid {'rgba(255, 255, 255, 0.34)' if dark else '#94A3B8'};
+}}
+QCheckBox::indicator:hover {{
+    border-color: {accent};
+}}
+QCheckBox::indicator:checked {{
+    background-color: {accent};
+    border: 1.5px solid {accent};
+    image: url("{chk_img}");
+}}
+QCheckBox::indicator:disabled {{
+    background-color: {'rgba(255, 255, 255, 0.03)' if dark else '#E2E8F0'};
+    border-color: {'rgba(255, 255, 255, 0.14)' if dark else '#CBD5E1'};
 }}
 QRadioButton {{
     color: {c['fg']};

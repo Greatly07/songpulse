@@ -17,7 +17,7 @@ from PyQt6.QtCore import (
     QVariantAnimation,
     pyqtSignal,
 )
-from PyQt6.QtGui import QAction, QFont, QIcon
+from PyQt6.QtGui import QAction, QFont, QFontMetrics, QIcon
 from PyQt6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -40,6 +40,7 @@ from PyQt6.QtWidgets import (
     QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
+    QWidgetAction,
 )
 
 from .audio import WAVEFORM_BARS, AudioBufferEngine
@@ -240,11 +241,11 @@ class SongPulseWindow(QMainWindow):
         self.setMinimumSize(464, 480)
         if self.settings.get("save_window_size", True):
             self.resize(
-                int(self.settings.get("window_width", 920)),
-                int(self.settings.get("window_height", 660)),
+                int(self.settings.get("window_width", 854)),
+                int(self.settings.get("window_height", 528)),
             )
         else:
-            self.resize(920, 660)
+            self.resize(854, 528)
 
         self.p_icons = {
             k: create_platform_icon(k, 14)
@@ -437,6 +438,18 @@ class SongPulseWindow(QMainWindow):
         self.collapse_btn.setIcon(create_ui_icon("sidebar", ctrl_col, 16))
         self.pin_btn.setIcon(create_ui_icon("pin", pin_col, 15))
         self.details_ui_icon = create_ui_icon("details", ctrl_col, 13)
+        self.playlist_ui_icon = create_ui_icon("playlist_add", ctrl_col, 14)
+        danger_col = "#F87171" if dark else "#DC2626"
+        self.close_danger_icon = create_ui_icon("close", danger_col, 13)
+        if hasattr(self, "clear_saved_clip_btn"):
+            self.clear_saved_clip_btn.setIcon(create_ui_icon("close", danger_col, 12))
+            self.clear_saved_clip_btn.setIconSize(QSize(12, 12))
+        if hasattr(self, "_lib_cards"):
+            for card in self._lib_cards:
+                if hasattr(card, "add_pl_btn"):
+                    card.add_pl_btn.setIcon(self.playlist_ui_icon)
+                if hasattr(card, "del_btn"):
+                    card.del_btn.setIcon(self.close_danger_icon)
         if hasattr(self, "mini_mode_btn"):
             self.mini_mode_btn.setIcon(create_ui_icon("mini_mode", ctrl_col, 14))
 
@@ -681,7 +694,7 @@ class SongPulseWindow(QMainWindow):
         self.test_saved_clip_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.test_saved_clip_btn.clicked.connect(self._test_saved_clip)
 
-        self.clear_saved_clip_btn = QPushButton("✕")
+        self.clear_saved_clip_btn = QPushButton("")
         self.clear_saved_clip_btn.setObjectName("IconDangerBtn")
         self.clear_saved_clip_btn.setFixedSize(26, 26)
         self.clear_saved_clip_btn.setToolTip("Delete saved test clip")
@@ -1003,9 +1016,17 @@ class SongPulseWindow(QMainWindow):
         self.selected_count_lbl = QLabel("")
         self.selected_count_lbl.setObjectName("Muted")
         self.selected_count_lbl.setStyleSheet("font-size: 11px;")
+        self.unselect_all_btn = QPushButton("Unselect All")
+        self.unselect_all_btn.setObjectName("PlatformBtn")
+        self.unselect_all_btn.setFixedHeight(26)
+        self.unselect_all_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.unselect_all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.unselect_all_btn.setEnabled(False)
+        self.unselect_all_btn.clicked.connect(self._on_unselect_all_clicked)
         sel_row.addWidget(self.select_all_chk)
         sel_row.addWidget(self.selected_count_lbl)
         sel_row.addStretch()
+        sel_row.addWidget(self.unselect_all_btn)
         layout.addLayout(sel_row)
 
         # Song list container (no nested scroll; entire page scrolls smoothly including left/right sides!)
@@ -1177,7 +1198,7 @@ class SongPulseWindow(QMainWindow):
         self.wf_maxw_spin.setRange(260, 900)
         self.wf_maxw_spin.setSingleStep(10)
         self.wf_maxw_spin.setSuffix(" px")
-        self.wf_maxw_spin.setFixedWidth(92)
+        self.wf_maxw_spin.setFixedWidth(96)
         self.wf_maxw_slider.valueChanged.connect(self._on_wf_maxw_slider_changed)
         self.wf_maxw_spin.valueChanged.connect(self._on_wf_maxw_spin_changed)
         maxw_row.addWidget(self.wf_maxw_slider, 1)
@@ -1201,7 +1222,7 @@ class SongPulseWindow(QMainWindow):
         self.wf_step_spin.setSingleStep(0.5)
         self.wf_step_spin.setSpecialValueText("Auto")
         self.wf_step_spin.setSuffix(" px")
-        self.wf_step_spin.setFixedWidth(92)
+        self.wf_step_spin.setFixedWidth(96)
         self.wf_step_auto_btn = QPushButton("Auto")
         self.wf_step_auto_btn.setObjectName("PlatformBtn")
         self.wf_step_auto_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -2054,6 +2075,7 @@ class SongPulseWindow(QMainWindow):
         self.settings["force_overlay_notification"] = self.force_overlay_chk.isChecked()
         self.settings["play_ping_sound"] = self.ping_chk.isChecked()
         self.settings["auto_copy"] = self.autocopy_chk.isChecked()
+        old_pref_site = self.settings.get("preferred_info_site", "auto")
         self.settings["preferred_info_site"] = self.info_site_combo.currentData() or "auto"
         self.settings["hotkey_mode"] = (
             "live" if self.hk_mode_combo.currentIndex() == 1 else "buffer"
@@ -2084,6 +2106,8 @@ class SongPulseWindow(QMainWindow):
         self.apply_theme(force=False)
         self._update_gpu_indicator()
         self._refresh_identify_header()
+        if self.settings.get("preferred_info_site", "auto") != old_pref_site:
+            self.refresh_library()
 
         if (
             self.settings["target_devices"] != old_devices
@@ -3343,11 +3367,21 @@ class SongPulseWindow(QMainWindow):
             self.lib_sticky_header.setUpdatesEnabled(True)
 
         self.selected_count_lbl.setText(f"{count} selected" if count > 0 else "")
+        if hasattr(self, "unselect_all_btn"):
+            self.unselect_all_btn.setEnabled(count > 0)
 
         total_visible = len(self._lib_cards)
         self.select_all_chk.blockSignals(True)
         self.select_all_chk.setChecked(total_visible > 0 and count == total_visible)
         self.select_all_chk.blockSignals(False)
+
+    def _on_unselect_all_clicked(self):
+        if not self.selected_song_ids:
+            return
+        self.selected_song_ids.clear()
+        for card in self._lib_cards:
+            card.set_checked_silent(False)
+        self._update_batch_ui()
 
     def _on_card_selection_toggled(self, song_id: str, checked: bool):
         if checked:
@@ -3371,7 +3405,7 @@ class SongPulseWindow(QMainWindow):
                 card.set_checked_silent(False)
         self._update_batch_ui()
 
-    def _toggle_song_liked(self, song_id: str):
+    def _toggle_song_liked(self, song_id: str, animate: bool = True, defer_liked_refresh: bool = False):
         new_liked = None
         for s in self.history:
             if s.get("id") == song_id:
@@ -3380,7 +3414,7 @@ class SongPulseWindow(QMainWindow):
                 save_history(self.history)
                 break
         if self.pages.currentIndex() == 1:
-            if self.active_playlist_key == "liked":
+            if self.active_playlist_key == "liked" and not defer_liked_refresh:
                 vbar = self.lib_scroll.verticalScrollBar()
                 scroll_pos = vbar.value()
                 self.refresh_library()
@@ -3388,7 +3422,7 @@ class SongPulseWindow(QMainWindow):
             elif new_liked is not None:
                 for card in self._lib_cards:
                     if card._song_id == song_id:
-                        card.set_liked(new_liked)
+                        card.set_liked(new_liked, animate=animate)
                         break
 
     def _get_song_listen_target(self, song: dict) -> tuple[str, str, str]:
@@ -3437,17 +3471,52 @@ class SongPulseWindow(QMainWindow):
         live_song = next((s for s in self.history if s.get("id") == song_id), song)
         liked = bool(live_song.get("liked", False))
         icon_col = "#D4D4D8" if self.last_dark_state else "#475569"
+        muted_col = "#9CA3AF" if self.last_dark_state else "#64748B"
 
         menu = ScrollThroughMenu(self.lib_scroll, self)
         menu.setMinimumWidth(220)
 
-        like_icon = create_ui_icon(
-            "heart_filled" if liked else "heart",
-            "#F43F5E" if liked else icon_col,
-            14,
+        # Tiny short song title header at the top of the right-click menu
+        hdr_widget = QWidget(menu)
+        hdr_lay = QHBoxLayout(hdr_widget)
+        hdr_lay.setContentsMargins(10, 4, 10, 2)
+        hdr_lay.setSpacing(0)
+        hdr_lbl = QLabel(hdr_widget)
+        hdr_lbl.setStyleSheet(
+            f"font-size: 11px; font-weight: 600; color: {muted_col}; background: transparent;"
         )
-        act_like = QAction(like_icon, "Unlike" if liked else "Like", menu)
-        act_like.triggered.connect(lambda checked=False, sid=song_id: self._toggle_song_liked(sid))
+        raw_title = (live_song.get("title") or "Unknown Song").strip()
+        short_title = QFontMetrics(hdr_lbl.font()).elidedText(
+            raw_title, Qt.TextElideMode.ElideRight, 196
+        )
+        hdr_lbl.setText(short_title)
+        hdr_lbl.setToolTip(raw_title)
+        hdr_lay.addWidget(hdr_lbl)
+        hdr_act = QWidgetAction(menu)
+        hdr_act.setDefaultWidget(hdr_widget)
+        menu.addAction(hdr_act)
+        menu.addSeparator()
+
+        act_like = QAction("", menu)
+        act_like.setProperty("keep_open", True)
+
+        def _sync_ctx_like_action(is_liked: bool):
+            act_like.setText("Unlike" if is_liked else "Like")
+            act_like.setIcon(
+                create_ui_icon(
+                    "heart_filled" if is_liked else "heart",
+                    "#F43F5E" if is_liked else icon_col,
+                    18,
+                )
+            )
+
+        _sync_ctx_like_action(liked)
+
+        def _on_ctx_like():
+            self._toggle_song_liked(song_id, animate=True, defer_liked_refresh=True)
+            _sync_ctx_like_action(bool(live_song.get("liked", False)))
+
+        act_like.triggered.connect(_on_ctx_like)
         menu.addAction(act_like)
 
         site_label, site_icon_key, listen_url = self._get_song_listen_target(live_song)
@@ -3511,6 +3580,36 @@ class SongPulseWindow(QMainWindow):
             else:
                 HistoryRowCard._suppress_next_card_click = True
                 HistoryRowCard._suppress_until = time.monotonic() + 0.18
+            if self.active_playlist_key == "liked" and not bool(live_song.get("liked", False)):
+                vbar = self.lib_scroll.verticalScrollBar()
+                scroll_pos = vbar.value()
+                self.refresh_library()
+                QTimer.singleShot(0, lambda p=scroll_pos: vbar.setValue(p))
+
+    def _show_card_add_playlist_menu(self, song_id: str, anchor_btn: QPushButton):
+        menu = ScrollThroughMenu(self.lib_scroll, anchor_btn)
+        menu.setMinimumWidth(185)
+        if self.playlists:
+            for pl in self.playlists:
+                in_pl = song_id in pl.get("song_ids", [])
+                pname = pl.get("name", "Playlist")
+                act_pl = QAction(f"✓  {pname}" if in_pl else pname, menu)
+                if in_pl:
+                    act_pl.setEnabled(False)
+                else:
+                    act_pl.triggered.connect(
+                        lambda checked=False, sid=song_id, pid=pl["id"]: self._add_song_to_playlist(sid, pid)
+                    )
+                menu.addAction(act_pl)
+            menu.addSeparator()
+
+        act_new_pl = QAction("+ Create New Playlist...", menu)
+        act_new_pl.triggered.connect(
+            lambda checked=False, sid=song_id: self._create_playlist_with_song(sid)
+        )
+        menu.addAction(act_new_pl)
+        menu.exec(anchor_btn.mapToGlobal(anchor_btn.rect().bottomLeft()))
+        menu.deleteLater()
 
     def _add_song_to_playlist(self, song_id: str, playlist_id: str):
         pl = next((p for p in self.playlists if p.get("id") == playlist_id), None)
@@ -3860,25 +3959,34 @@ class SongPulseWindow(QMainWindow):
             if pl is not None
             else ("Remove from Liked Songs" if self.active_playlist_key == "liked" else "Remove from library")
         )
-        details_icon = getattr(self, "details_ui_icon", create_ui_icon("details", "#D4D4D8", 13))
+        playlist_icon = getattr(
+            self, "playlist_ui_icon", create_ui_icon("playlist_add", "#D4D4D8", 14)
+        )
+        close_icon = getattr(
+            self, "close_danger_icon", create_ui_icon("close", "#F87171", 13)
+        )
         vp_w = self.lib_scroll.viewport().width() if hasattr(self, "lib_scroll") else 0
-        init_compact = bool(vp_w > 0 and (vp_w - 52) < 680)
+        init_compact = bool(vp_w > 0 and (vp_w - 52) < 550)
 
         for song in filtered:
             sid = song.get("id", "")
             card = HistoryRowCard(
                 song,
                 self.p_icons,
-                details_icon,
+                self._get_song_listen_target(song),
+                playlist_icon,
+                close_icon,
                 on_details=self._open_song_details,
                 on_delete=self.delete_history_item,
+                on_playlist_menu=self._show_card_add_playlist_menu,
                 checked=sid in self.selected_song_ids,
                 allow_reorder=allow_reorder,
                 delete_tooltip=del_tip,
                 initial_compact=init_compact,
+                scroll_area=self.lib_scroll,
             )
             card.selection_toggled.connect(self._on_card_selection_toggled)
-            card.like_toggled.connect(self._toggle_song_liked)
+            card.like_toggled.connect(lambda s_id: self._toggle_song_liked(s_id, animate=True))
             card.context_menu_requested.connect(self._show_song_context_menu)
             if allow_reorder:
                 card.move_requested.connect(self._move_playlist_song)
