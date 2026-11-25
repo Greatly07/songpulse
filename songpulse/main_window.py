@@ -449,10 +449,10 @@ class SongPulseWindow(QMainWindow):
         self.details_ui_icon = create_ui_icon("details", ctrl_col, 13)
         self.playlist_ui_icon = create_ui_icon("playlist_add", ctrl_col, 14)
         danger_col = "#F87171" if dark else "#DC2626"
-        self.close_danger_icon = create_ui_icon("close", danger_col, 13)
+        self.close_danger_icon = create_ui_icon("close", danger_col, 18)
         if hasattr(self, "clear_saved_clip_btn"):
-            self.clear_saved_clip_btn.setIcon(create_ui_icon("close", danger_col, 12))
-            self.clear_saved_clip_btn.setIconSize(QSize(12, 12))
+            self.clear_saved_clip_btn.setIcon(create_ui_icon("close", danger_col, 16))
+            self.clear_saved_clip_btn.setIconSize(QSize(16, 16))
         if hasattr(self, "_lib_cards"):
             for card in self._lib_cards:
                 if hasattr(card, "add_pl_btn"):
@@ -1030,7 +1030,7 @@ class SongPulseWindow(QMainWindow):
         self.unselect_all_btn.setFixedHeight(26)
         self.unselect_all_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.unselect_all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.unselect_all_btn.setEnabled(False)
+        self.unselect_all_btn.hide()
         self.unselect_all_btn.clicked.connect(self._on_unselect_all_clicked)
         sel_row.addWidget(self.select_all_chk)
         sel_row.addWidget(self.selected_count_lbl)
@@ -3447,7 +3447,7 @@ class SongPulseWindow(QMainWindow):
 
         self.selected_count_lbl.setText(f"{count} selected" if count > 0 else "")
         if hasattr(self, "unselect_all_btn"):
-            self.unselect_all_btn.setEnabled(count > 0)
+            self.unselect_all_btn.setVisible(count > 0)
 
         total_visible = len(self._lib_cards)
         self.select_all_chk.blockSignals(True)
@@ -4052,7 +4052,7 @@ class SongPulseWindow(QMainWindow):
             self, "playlist_ui_icon", create_ui_icon("playlist_add", "#D4D4D8", 14)
         )
         close_icon = getattr(
-            self, "close_danger_icon", create_ui_icon("close", "#F87171", 13)
+            self, "close_danger_icon", create_ui_icon("close", "#F87171", 18)
         )
         vp_w = self.lib_scroll.viewport().width() if hasattr(self, "lib_scroll") else 0
         init_compact = bool(vp_w > 0 and (vp_w - 52) < 550)

@@ -20,7 +20,7 @@ import soundfile as sf
 
 # --- APP METADATA & PATHS ---
 APP_NAME = "SongPulse"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.1"
 APP_USER_MODEL_ID = f"Greatly07.SongPulse.{APP_VERSION}"
 GITHUB_REPO = "Greatly07/songpulse"
 YTDLP_GITHUB_REPO = "Greatly07/yt-dlp-downloader"

@@ -2,7 +2,7 @@
 setlocal
 cd /d "%~dp0"
 
-set "APP_VER=1.2.0"
+set "APP_VER=1.2.1"
 if not exist "release" mkdir "release"
 
 if exist "dist" (

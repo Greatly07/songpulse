@@ -1222,7 +1222,7 @@ class HistoryRowCard(QFrame):
         self.del_btn = QPushButton("")
         self.del_btn.setObjectName("IconDangerBtn")
         self.del_btn.setIcon(close_icon)
-        self.del_btn.setIconSize(QSize(13, 13))
+        self.del_btn.setIconSize(QSize(18, 18))
         self.del_btn.setFixedSize(28, 28)
         self.del_btn.setToolTip(delete_tooltip)
         self.del_btn.setCursor(Qt.CursorShape.PointingHandCursor)

@@ -1,5 +1,5 @@
 #define MyAppName "SongPulse"
-#define MyAppVersion "1.2.0"
+#define MyAppVersion "1.2.1"
 #define MyAppPublisher "Greatly07"
 #define MyAppURL "https://github.com/Greatly07/songpulse"
 #define MyAppExeName "SongPulse.exe"

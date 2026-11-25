@@ -6,7 +6,7 @@ A lightweight Windows desktop music identifier that listens directly to your PC'
 
 ---
 
-## Features (v1.2.0)
+## Features (v1.2.1)
 
 - **Multi-Output Desktop Audio Capture:** Listens directly to one or more Windows playback devices simultaneously via WASAPI loopback without needing a microphone or virtual audio cables. Includes an option to disable the rolling RAM buffer when you only want Listen Live.
 
@@ -16,7 +16,7 @@ A lightweight Windows desktop music identifier that listens directly to your PC'
   - **Identify Last (Rolling Buffer):** Keeps the last 5 to 30 seconds of desktop audio in RAM so you can identify a track you just heard immediately, or **Save Last Xs** to test a captured clip against multiple AI models without losing the audio.
   - **Mini Window:** Compact always-on-top mini window with live waveforms, Listen, Identify Last, and AI Rescue toggle.
 
-  <img width="195" alt="Miniplayer Default" src="assets/Miniplayer_Default.png" /> <img width="195" alt="Miniplayer Miku" src="assets/Miniplayer_Miku.png" /> <img width="195" alt="Miniplayer Teto" src="assets/Miniplayer_Teto.png" /> <img width="195" alt="Miniplayer Custom Synthion" src="assets/Miniplayer_CustomSythion.png" />
+  <img width="195" alt="Miniplayer Default" src="assets/Miniplayer_Default.png" /> <img width="195" alt="Miniplayer Miku" src="assets/Miniplayer_Miku.png" /> <img width="195" alt="Miniplayer Teto" src="assets/Miniplayer_Teto.png" /> <img width="195" alt="Miniplayer Synthion" src="assets/Miniplayer_Sythion.png" />
 - **Optional Tricky-Track Local AI Rescue (Saves Space):**
   - Core SongPulse installs with **no AI engine or models downloaded by default**.
   - Choose from curated tricky-track rescue models in **Settings -> AI Models** (or during Setup): **De-Reverb HQ**, **UVR De-Echo & De-Reverb**, **UVR DeNoise (SFX & Static)**, **UVR Crowd Remover**, **Whisper Lyrics Rescue (Tiny / Base)** for sped-up, slowed+reverb, and covers, **UVR Inst HQ 3**, or import your own custom `.onnx` / `.pth` / `.ckpt` model.
@@ -43,7 +43,9 @@ A lightweight Windows desktop music identifier that listens directly to your PC'
   - Create custom themes visually with a live preview in **Settings -> Create Theme** or edit JSON templates in `custom_themes/` with solid colors, gradients, or photos for the background, sidebar, and mini-player (including an optional **Synthion** preset in `custom_themes/synthion/`).
   - Customize waveform shape (**Radial**, **Horizontal Split**, **Pulse Line**, **Bottom Bar**, **Dots Ring**), mirroring, idle resting dots, and max width.
 
-  <img width="420" alt="Custom Synthion Theme" src="assets/Identify_CustomSynthion.png" /> <img width="420" alt="Custom Theme Editor" src="assets/CustomThemeTemplate_CustomSynthion.png" />
+  <img width="420" alt="Synthion Theme" src="assets/Identify_Synthion.png" /> <img width="420" alt="Custom Theme Editor" src="assets/CustomThemeTemplate_Synthion.png" />
+  <br>
+  <img width="480" alt="Look, Theme & Waveform Settings" src="assets/SettingsLookTheme_Synthion.png" />
 - **Rich Song Details, In-App Artist/Album Popup & Full Web Player:**
   - Dynamic album-art gradient detail view with responsive wrapped platform buttons, separated clickable artist chips, sticky top action bar, centered in-app Artist and Album info popups (clicking the name/title inside opens on your chosen site from Settings), built-in 30s audio preview, and a lightweight **Full Player** web viewer.
 
@@ -83,7 +85,7 @@ A lightweight Windows desktop music identifier that listens directly to your PC'
 
 ### Option 1: Windows Installer (Recommended)
 
-1. Download `SongPulse_Setup_v1.2.0.exe` from the [Releases](https://github.com/Greatly07/songpulse/releases/latest) page.
+1. Download `SongPulse_Setup_v1.2.1.exe` from the [Releases](https://github.com/Greatly07/songpulse/releases/latest) page.
 2. Run the installer (installs per-user to `%LOCALAPPDATA%\Programs\SongPulse`; no admin rights required).
 3. Choose **Compact installation** (Core only, smallest footprint) or **Custom installation** to optionally include the AI Engine and models.
 4. Launch **SongPulse** from your Start Menu.
