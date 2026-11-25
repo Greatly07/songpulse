@@ -77,6 +77,8 @@ from .theme import (
 )
 from .themes_manager import resolve_theme_image_path
 from .waveforms import (
+    WAVEFORM_FLIP_HZ_STYLES,
+    WAVEFORM_MIRROR_STYLES,
     paint_miku_centerline_bars,
     paint_miku_centerline_pulse,
     paint_miku_hair_ties,
@@ -1489,9 +1491,9 @@ class PulseIdentifyWidget(QWidget):
             if style in ("radial", "horizontal", "pulse_line", "bar", "dots")
             else "radial"
         )
-        self._wf_mirror = bool(mirror)
+        self._wf_mirror = bool(mirror) and (self._wf_style in WAVEFORM_MIRROR_STYLES)
         self._wf_idle_dots = bool(idle_dots)
-        self._wf_flip_hz = bool(flip_hz)
+        self._wf_flip_hz = bool(flip_hz) and (self._wf_style in WAVEFORM_FLIP_HZ_STYLES)
         self._wf_hair_ties = bool(hair_ties)
         self._wf_right_alt_white = bool(right_alt_white)
         self._wf_teto_bow = bool(teto_bow)
@@ -1645,12 +1647,6 @@ class PulseIdentifyWidget(QWidget):
     def _effective_bars(self, count: int) -> list[float]:
         src = self._bars
         n = len(src)
-        if self._wf_mirror and count >= 2:
-            half_c = count // 2
-            half = [src[int((i / max(1, half_c)) * n) % n] for i in range(half_c)]
-            if count % 2 == 1:
-                return half + [half[-1]] + half[::-1]
-            return half + half[::-1]
         return [src[int((i / max(1, count)) * n) % n] for i in range(count)]
 
     def paintEvent(self, event):
@@ -1957,6 +1953,8 @@ class PulseIdentifyWidget(QWidget):
         base_y = self.height() - 26.0
         max_h = 30.0
         bars = self._effective_bars(count)
+        if self._wf_flip_hz:
+            bars = bars[::-1]
 
         for i, amp in enumerate(bars):
             x = start_x + i * step

@@ -5,7 +5,11 @@ import re
 import shutil
 
 from .config import APP_DIR, THEME_PHOTOS_DIR, THEMES_DIR
-from .waveforms import resolve_template_waveform
+from .waveforms import (
+    WAVEFORM_FLIP_HZ_STYLES,
+    WAVEFORM_MIRROR_STYLES,
+    resolve_template_waveform,
+)
 
 TEMPLATE_FILENAME = "_template.json"
 README_FILENAME = "README.txt"
@@ -89,6 +93,7 @@ THEME_TEMPLATE = {
     "waveform": {
         "style": "auto",  # "auto", "radial", "horizontal", "pulse_line", "bar", "dots"
         "mirror": False,
+        "flip_hz": False,
         "idle_dots": False,
         "color1": "#38BDF8",
         "color2": "#8B5CF6",
@@ -405,6 +410,14 @@ def _normalize_loaded_theme(raw: dict, theme_id: str, base_dir: str = "") -> dic
         merged["miniplayer"]["use_main_bg"] = False
 
     merged["waveform"] = resolve_template_waveform(merged)
+    wf_cfg = merged["waveform"]
+    wf_style = str(wf_cfg.get("style") or "radial")
+    if wf_style == "auto":
+        wf_style = "radial"
+    if wf_style not in WAVEFORM_MIRROR_STYLES:
+        wf_cfg["mirror"] = False
+    if wf_style not in WAVEFORM_FLIP_HZ_STYLES:
+        wf_cfg["flip_hz"] = False
     return merged
 
 
@@ -452,7 +465,7 @@ def load_theme_config(theme_key: str, system_dark: bool) -> dict:
                 "text": "#F4F4F5",
                 "muted": "#9CA3AF",
             },
-            "waveform": {"style": "radial", "mirror": False, "idle_dots": False, "color1": "#3B82F6", "color2": "#8B5CF6"},
+            "waveform": {"style": "radial", "mirror": False, "flip_hz": False, "idle_dots": False, "color1": "#3B82F6", "color2": "#8B5CF6"},
         }
     return {
         "id": "light",
@@ -469,7 +482,7 @@ def load_theme_config(theme_key: str, system_dark: bool) -> dict:
             "text": "#111827",
             "muted": "#526075",
         },
-        "waveform": {"style": "radial", "mirror": False, "idle_dots": False, "color1": "#2563EB", "color2": "#7C3AED"},
+        "waveform": {"style": "radial", "mirror": False, "flip_hz": False, "idle_dots": False, "color1": "#2563EB", "color2": "#7C3AED"},
     }
 
 

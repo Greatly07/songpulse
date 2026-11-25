@@ -247,6 +247,7 @@ DEFAULT_SETTINGS = {
     "text_size": "small",  # "small", "medium", "large", "xlarge"
     "waveform_style": "auto",  # "auto", "radial", "horizontal", "pulse_line", "bar", "dots"
     "waveform_mirror": False,
+    "waveform_flip_hz": False,
     "waveform_idle_dots": False,
     "waveform_max_width": 620,
     "waveform_step": 0.0,  # 0.0 = Auto (style default), else custom spacing in px

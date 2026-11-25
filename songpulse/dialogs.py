@@ -46,7 +46,11 @@ from .themes_manager import (
     save_custom_theme,
 )
 from .theme import create_ui_icon
-from .waveforms import resolve_template_waveform
+from .waveforms import (
+    WAVEFORM_FLIP_HZ_STYLES,
+    WAVEFORM_MIRROR_STYLES,
+    resolve_template_waveform,
+)
 from .widgets import ElidedLabel, NoWheelComboBox, NoWheelSpinBox, _paint_surface
 from .workers import GithubPresetsCatalogWorker, GithubPresetsInstallWorker
 from .workers import YtDlpInstallerWorker
@@ -882,13 +886,30 @@ class CustomThemeDialog(QDialog):
         self.wf_style = NoWheelComboBox()
         self.wf_style.addItems(["Radial", "Horizontal Split", "Pulse Line", "Bottom Bar", "Dots"])
         set_delayed_tooltip(self.wf_style, "Default waveform shape when this theme is active.")
-        self.wf_style.currentIndexChanged.connect(self._on_any_change)
+        self.wf_style.currentIndexChanged.connect(self._on_wf_style_changed)
         wf_r.addWidget(self.wf_style)
+        self._wf_manual_mirror = False
+        self._wf_manual_flip_hz = False
         self.wf_mirror = QCheckBox("Mirrored")
-        self.wf_mirror.stateChanged.connect(self._on_any_change)
+        set_delayed_tooltip(
+            self.wf_mirror,
+            "Mirror left and right sides using combined mono audio instead of stereo L/R (Horizontal Split & Pulse Line only).",
+        )
+        self.wf_mirror.stateChanged.connect(self._on_wf_opt_changed)
+        self.wf_flip_hz = QCheckBox("Flip Hz")
+        set_delayed_tooltip(
+            self.wf_flip_hz,
+            "Reverse frequency direction (Horizontal Split, Pulse Line & Bottom Bar only).",
+        )
+        self.wf_flip_hz.stateChanged.connect(self._on_wf_opt_changed)
         self.wf_idle_dots = QCheckBox("Idle dots when silent")
+        set_delayed_tooltip(
+            self.wf_idle_dots,
+            "Keep resting dots/line visible when no audio is playing.",
+        )
         self.wf_idle_dots.stateChanged.connect(self._on_any_change)
         wf_r.addWidget(self.wf_mirror)
+        wf_r.addWidget(self.wf_flip_hz)
         wf_r.addWidget(self.wf_idle_dots)
         wf_r.addStretch()
         ac_l.addLayout(wf_r)
@@ -937,6 +958,7 @@ class CustomThemeDialog(QDialog):
         else:
             for sec in (self._bg_sec, self._sb_sec, self._mini_sec):
                 self._sync_section_visibility(sec)
+            self._sync_wf_checkboxes()
         self._suppress_preview = False
 
     def _build_surface_card(
@@ -1108,6 +1130,33 @@ class CustomThemeDialog(QDialog):
         self._sync_section_visibility(sec)
         self._on_any_change()
 
+    def _sync_wf_checkboxes(self):
+        wf_map = {0: "radial", 1: "horizontal", 2: "pulse_line", 3: "bar", 4: "dots"}
+        style = wf_map.get(self.wf_style.currentIndex(), "radial")
+        mirror_avail = style in WAVEFORM_MIRROR_STYLES
+        flip_avail = style in WAVEFORM_FLIP_HZ_STYLES
+
+        self.wf_mirror.blockSignals(True)
+        self.wf_mirror.setChecked(self._wf_manual_mirror if mirror_avail else False)
+        self.wf_mirror.setEnabled(mirror_avail)
+        self.wf_mirror.blockSignals(False)
+
+        self.wf_flip_hz.blockSignals(True)
+        self.wf_flip_hz.setChecked(self._wf_manual_flip_hz if flip_avail else False)
+        self.wf_flip_hz.setEnabled(flip_avail)
+        self.wf_flip_hz.blockSignals(False)
+
+    def _on_wf_style_changed(self, *_args):
+        self._sync_wf_checkboxes()
+        self._on_any_change()
+
+    def _on_wf_opt_changed(self, *_args):
+        if self.wf_mirror.isEnabled():
+            self._wf_manual_mirror = self.wf_mirror.isChecked()
+        if self.wf_flip_hz.isEnabled():
+            self._wf_manual_flip_hz = self.wf_flip_hz.isChecked()
+        self._on_any_change()
+
     def _on_any_change(self, *_args):
         if self._suppress_preview:
             return
@@ -1197,9 +1246,11 @@ class CustomThemeDialog(QDialog):
             self.ac2.set_color(str(cols["accent_secondary"]))
 
         wf_map = {"radial": 0, "horizontal": 1, "pulse_line": 2, "bar": 3, "dots": 4}
+        self._wf_manual_mirror = bool(wf.get("mirror", False))
+        self._wf_manual_flip_hz = bool(wf.get("flip_hz", False))
         self.wf_style.setCurrentIndex(wf_map.get(str(wf.get("style", "radial")), 0))
-        self.wf_mirror.setChecked(bool(wf.get("mirror", False)))
         self.wf_idle_dots.setChecked(bool(wf.get("idle_dots", False)))
+        self._sync_wf_checkboxes()
 
     def _build_theme_payload(self, for_preview: bool = False) -> dict:
         name = self.name_in.text().strip() or "My Custom Theme"
@@ -1239,12 +1290,13 @@ class CustomThemeDialog(QDialog):
             "text": "#F4F8FF" if dark else "#0F172A",
             "muted": "#9BB6CC" if dark else "#475569",
         }
+        wf_style = wf_map[self.wf_style.currentIndex()]
         wf_dict = dict(raw_base.get("waveform")) if isinstance(raw_base.get("waveform"), dict) else {}
         wf_dict.update(
             {
-                "style": wf_map[self.wf_style.currentIndex()],
-                "mirror": self.wf_mirror.isChecked(),
-                "flip_hz": self.wf_mirror.isChecked(),
+                "style": wf_style,
+                "mirror": self.wf_mirror.isChecked() if wf_style in WAVEFORM_MIRROR_STYLES else False,
+                "flip_hz": self.wf_flip_hz.isChecked() if wf_style in WAVEFORM_FLIP_HZ_STYLES else False,
                 "idle_dots": self.wf_idle_dots.isChecked(),
                 "color1": self.ac1.hex_value(),
                 "color2": self.ac2.hex_value(),

@@ -120,6 +120,10 @@ from .themes_manager import (
     list_all_theme_choices,
     load_theme_config,
 )
+from .waveforms import (
+    WAVEFORM_FLIP_HZ_STYLES,
+    WAVEFORM_MIRROR_STYLES,
+)
 from .widgets import (
     AudioOutputListWidget,
     CheckableComboBox,
@@ -1184,10 +1188,22 @@ class SongPulseWindow(QMainWindow):
         wf_opts_row = QHBoxLayout()
         wf_opts_row.setSpacing(14)
         self.wf_mirror_chk = QCheckBox("Mirror waveform")
+        self.wf_mirror_chk.setToolTip(
+            "Mirror left and right sides using combined mono audio instead of stereo L/R (Horizontal Split & Pulse Line only)."
+        )
         self.wf_mirror_chk.stateChanged.connect(self._on_wf_opt_chk_changed)
+        self.wf_flip_hz_chk = QCheckBox("Flip Hz")
+        self.wf_flip_hz_chk.setToolTip(
+            "Reverse frequency direction (Horizontal Split, Pulse Line & Bottom Bar only)."
+        )
+        self.wf_flip_hz_chk.stateChanged.connect(self._on_wf_opt_chk_changed)
         self.wf_idle_dots_chk = QCheckBox("Show dots when silent")
+        self.wf_idle_dots_chk.setToolTip(
+            "Keep resting dots/line visible when no audio is playing."
+        )
         self.wf_idle_dots_chk.stateChanged.connect(self._on_wf_opt_chk_changed)
         wf_opts_row.addWidget(self.wf_mirror_chk)
+        wf_opts_row.addWidget(self.wf_flip_hz_chk)
         wf_opts_row.addWidget(self.wf_idle_dots_chk)
         wf_opts_row.addStretch()
         app_lay.addLayout(wf_opts_row)
@@ -1759,48 +1775,67 @@ class SongPulseWindow(QMainWindow):
         if getattr(self, "_suppress_unsaved", False):
             return
         if hasattr(self, "wf_style_combo") and self.wf_style_combo.currentIndex() != 0:
-            self._manual_wf_mirror = self.wf_mirror_chk.isChecked()
-            self._manual_wf_idle_dots = self.wf_idle_dots_chk.isChecked()
+            if hasattr(self, "wf_mirror_chk") and self.wf_mirror_chk.isEnabled():
+                self._manual_wf_mirror = self.wf_mirror_chk.isChecked()
+            if hasattr(self, "wf_flip_hz_chk") and self.wf_flip_hz_chk.isEnabled():
+                self._manual_wf_flip_hz = self.wf_flip_hz_chk.isChecked()
+            if hasattr(self, "wf_idle_dots_chk") and self.wf_idle_dots_chk.isEnabled():
+                self._manual_wf_idle_dots = self.wf_idle_dots_chk.isChecked()
         self._mark_unsaved()
 
     def _sync_waveform_auto_checkboxes(self):
         if not hasattr(self, "wf_style_combo"):
             return
-        is_auto = self.wf_style_combo.currentIndex() == 0
+        wf_styles = ["auto", "radial", "horizontal", "pulse_line", "bar", "dots"]
+        cur_style = wf_styles[max(0, self.wf_style_combo.currentIndex())]
+        is_auto = cur_style == "auto"
         if is_auto:
             t_key = self.theme_combo.currentData() or self.settings.get("theme", "auto")
             cfg = load_theme_config(t_key, is_windows_dark_mode())
             wf = cfg.get("waveform", {})
-            mirror = bool(wf.get("mirror", False))
+            eff_style = str(wf.get("style") or "radial")
+            if eff_style == "auto":
+                eff_style = "radial"
+            mirror = bool(wf.get("mirror", False)) and (eff_style in WAVEFORM_MIRROR_STYLES)
+            flip_hz = bool(wf.get("flip_hz", False)) and (eff_style in WAVEFORM_FLIP_HZ_STYLES)
             idle_dots = bool(wf.get("idle_dots", False))
-            if hasattr(self, "wf_mirror_chk"):
-                self.wf_mirror_chk.blockSignals(True)
-                self.wf_mirror_chk.setChecked(mirror)
-                self.wf_mirror_chk.setEnabled(False)
-                self.wf_mirror_chk.blockSignals(False)
-            if hasattr(self, "wf_idle_dots_chk"):
-                self.wf_idle_dots_chk.blockSignals(True)
-                self.wf_idle_dots_chk.setChecked(idle_dots)
-                self.wf_idle_dots_chk.setEnabled(False)
-                self.wf_idle_dots_chk.blockSignals(False)
+            for attr, val in (
+                ("wf_mirror_chk", mirror),
+                ("wf_flip_hz_chk", flip_hz),
+                ("wf_idle_dots_chk", idle_dots),
+            ):
+                chk = getattr(self, attr, None)
+                if chk is not None:
+                    chk.blockSignals(True)
+                    chk.setChecked(val)
+                    chk.setEnabled(False)
+                    chk.blockSignals(False)
         else:
+            mirror_avail = cur_style in WAVEFORM_MIRROR_STYLES
+            flip_avail = cur_style in WAVEFORM_FLIP_HZ_STYLES
             mirror = bool(getattr(self, "_manual_wf_mirror", self.settings.get("waveform_mirror", False)))
+            flip_hz = bool(getattr(self, "_manual_wf_flip_hz", self.settings.get("waveform_flip_hz", False)))
             idle_dots = bool(getattr(self, "_manual_wf_idle_dots", self.settings.get("waveform_idle_dots", False)))
-            if hasattr(self, "wf_mirror_chk"):
-                self.wf_mirror_chk.blockSignals(True)
-                self.wf_mirror_chk.setChecked(mirror)
-                self.wf_mirror_chk.setEnabled(True)
-                self.wf_mirror_chk.blockSignals(False)
-            if hasattr(self, "wf_idle_dots_chk"):
-                self.wf_idle_dots_chk.blockSignals(True)
-                self.wf_idle_dots_chk.setChecked(idle_dots)
-                self.wf_idle_dots_chk.setEnabled(True)
-                self.wf_idle_dots_chk.blockSignals(False)
+            for attr, val, enabled in (
+                ("wf_mirror_chk", mirror if mirror_avail else False, mirror_avail),
+                ("wf_flip_hz_chk", flip_hz if flip_avail else False, flip_avail),
+                ("wf_idle_dots_chk", idle_dots, True),
+            ):
+                chk = getattr(self, attr, None)
+                if chk is not None:
+                    chk.blockSignals(True)
+                    chk.setChecked(val)
+                    chk.setEnabled(enabled)
+                    chk.blockSignals(False)
 
     def _apply_and_save_custom_theme(self, theme_key: str):
         cfg = load_theme_config(theme_key, is_windows_dark_mode())
         wf = cfg.get("waveform", {})
-        mirror = bool(wf.get("mirror", False))
+        eff_style = str(wf.get("style") or "radial")
+        if eff_style == "auto":
+            eff_style = "radial"
+        mirror = bool(wf.get("mirror", False)) and (eff_style in WAVEFORM_MIRROR_STYLES)
+        flip_hz = bool(wf.get("flip_hz", False)) and (eff_style in WAVEFORM_FLIP_HZ_STYLES)
         idle_dots = bool(wf.get("idle_dots", False))
 
         self._suppress_unsaved = True
@@ -1808,21 +1843,23 @@ class SongPulseWindow(QMainWindow):
             self._refresh_theme_dropdown(theme_key)
             if hasattr(self, "wf_style_combo"):
                 self.wf_style_combo.setCurrentIndex(0)
-            if hasattr(self, "wf_mirror_chk"):
-                self.wf_mirror_chk.setChecked(mirror)
-            if hasattr(self, "wf_idle_dots_chk"):
-                self.wf_idle_dots_chk.setChecked(idle_dots)
+            self._manual_wf_mirror = mirror
+            self._manual_wf_flip_hz = flip_hz
+            self._manual_wf_idle_dots = idle_dots
+            self._sync_waveform_auto_checkboxes()
         finally:
             self._suppress_unsaved = False
 
         self.settings["theme"] = theme_key
         self.settings["waveform_style"] = "auto"
         self.settings["waveform_mirror"] = mirror
+        self.settings["waveform_flip_hz"] = flip_hz
         self.settings["waveform_idle_dots"] = idle_dots
 
         self._saved_settings_snapshot["theme"] = theme_key
         self._saved_settings_snapshot["waveform_style"] = "auto"
         self._saved_settings_snapshot["waveform_mirror"] = mirror
+        self._saved_settings_snapshot["waveform_flip_hz"] = flip_hz
         self._saved_settings_snapshot["waveform_idle_dots"] = idle_dots
         save_settings(self._saved_settings_snapshot)
 
@@ -1936,8 +1973,10 @@ class SongPulseWindow(QMainWindow):
                 wf_map.get(self.settings.get("waveform_style", "auto"), 0)
             )
             self._manual_wf_mirror = bool(self.settings.get("waveform_mirror", False))
+            self._manual_wf_flip_hz = bool(self.settings.get("waveform_flip_hz", False))
             self._manual_wf_idle_dots = bool(self.settings.get("waveform_idle_dots", False))
             self.wf_mirror_chk.setChecked(self._manual_wf_mirror)
+            self.wf_flip_hz_chk.setChecked(self._manual_wf_flip_hz)
             self.wf_idle_dots_chk.setChecked(self._manual_wf_idle_dots)
             self._sync_waveform_auto_checkboxes()
             max_w = int(self.settings.get("waveform_max_width", 620))
@@ -2040,7 +2079,8 @@ class SongPulseWindow(QMainWindow):
             (self.icon_color_combo.currentData() or "theme") != snap.get("icon_color", "theme"),
             (self.text_size_combo.currentData() or "small") != snap.get("text_size", "small"),
             cur_wf != snap.get("waveform_style", "auto"),
-            (cur_wf != "auto") and (self.wf_mirror_chk.isChecked() != bool(snap.get("waveform_mirror", False))),
+            (cur_wf in WAVEFORM_MIRROR_STYLES) and (self.wf_mirror_chk.isChecked() != bool(snap.get("waveform_mirror", False))),
+            (cur_wf in WAVEFORM_FLIP_HZ_STYLES) and (self.wf_flip_hz_chk.isChecked() != bool(snap.get("waveform_flip_hz", False))),
             (cur_wf != "auto") and (self.wf_idle_dots_chk.isChecked() != bool(snap.get("waveform_idle_dots", False))),
             self.wf_maxw_spin.value() != int(snap.get("waveform_max_width", 620)),
             round(float(self.wf_step_spin.value()), 1) != round(float(snap.get("waveform_step", 0.0) or 0.0), 1),
@@ -2091,9 +2131,13 @@ class SongPulseWindow(QMainWindow):
         self.settings["icon_color"] = self.icon_color_combo.currentData() or "theme"
         self.settings["text_size"] = self.text_size_combo.currentData() or "small"
         wf_styles = ["auto", "radial", "horizontal", "pulse_line", "bar", "dots"]
-        self.settings["waveform_style"] = wf_styles[max(0, self.wf_style_combo.currentIndex())]
-        if self.settings["waveform_style"] != "auto":
-            self.settings["waveform_mirror"] = self.wf_mirror_chk.isChecked()
+        wf_style = wf_styles[max(0, self.wf_style_combo.currentIndex())]
+        self.settings["waveform_style"] = wf_style
+        if wf_style != "auto":
+            if wf_style in WAVEFORM_MIRROR_STYLES:
+                self.settings["waveform_mirror"] = self.wf_mirror_chk.isChecked()
+            if wf_style in WAVEFORM_FLIP_HZ_STYLES:
+                self.settings["waveform_flip_hz"] = self.wf_flip_hz_chk.isChecked()
             self.settings["waveform_idle_dots"] = self.wf_idle_dots_chk.isChecked()
         self.settings["waveform_max_width"] = self.wf_maxw_spin.value()
         self.settings["waveform_step"] = round(float(self.wf_step_spin.value()), 1)
@@ -2983,18 +3027,22 @@ class SongPulseWindow(QMainWindow):
         wf_pref = self.settings.get("waveform_style", "auto")
         wf_theme = cfg.get("waveform", {})
         if self._preview_theme_override is not None or wf_pref == "auto":
-            eff_style = wf_theme.get("style", "radial")
+            eff_style = str(wf_theme.get("style") or "radial")
+            if eff_style == "auto":
+                eff_style = "radial"
             eff_mirror = bool(wf_theme.get("mirror", False))
             eff_idle_dots = bool(wf_theme.get("idle_dots", False))
-            eff_flip_hz = bool(wf_theme.get("flip_hz", eff_mirror))
+            eff_flip_hz = bool(wf_theme.get("flip_hz", False))
         else:
             eff_style = wf_pref
             eff_mirror = bool(self.settings.get("waveform_mirror", False))
             eff_idle_dots = bool(self.settings.get("waveform_idle_dots", False))
-            if wf_theme.get("teto_bow") and "flip_hz" in wf_theme:
-                eff_flip_hz = bool(wf_theme.get("flip_hz", False))
-            else:
-                eff_flip_hz = bool(eff_mirror)
+            eff_flip_hz = bool(self.settings.get("waveform_flip_hz", False))
+
+        if eff_style not in WAVEFORM_MIRROR_STYLES:
+            eff_mirror = False
+        if eff_style not in WAVEFORM_FLIP_HZ_STYLES:
+            eff_flip_hz = False
         eff_max_w = int(self.settings.get("waveform_max_width", 620))
         eff_step = float(self.settings.get("waveform_step", 0.0) or 0.0)
         icon_pref = self.settings.get("icon_color", "theme")

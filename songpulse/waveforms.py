@@ -1,6 +1,9 @@
 from PyQt6.QtCore import QPointF, QRectF, Qt
 from PyQt6.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPainterPath, QPen, QPolygonF
 
+WAVEFORM_MIRROR_STYLES = ("horizontal", "pulse_line")
+WAVEFORM_FLIP_HZ_STYLES = ("horizontal", "pulse_line", "bar")
+
 TEMPLATE_WAVEFORM_PRESETS = {
     "miku": {
         "style": "pulse_line",
